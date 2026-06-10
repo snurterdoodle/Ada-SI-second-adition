@@ -4,14 +4,19 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Ada-SI Chat</title>
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/github-dark.min.css"
+    />
     <link rel="stylesheet" href="/static/style.css" />
   </head>
   <body>
     <div class="app">
       <header class="header">
-        <div>
+        <div class="header-left">
           <h1>Ada-SI Chat</h1>
           <p class="subtitle">Powered by LiteLLM</p>
+          <button id="new-chat" type="button" class="btn-secondary">New chat</button>
         </div>
         <div class="model-picker">
           <label for="model-select">Model</label>
@@ -29,7 +34,17 @@
         </div>
       </header>
 
-      <main id="messages" class="messages" aria-live="polite"></main>
+      <div class="messages-wrap">
+        <main id="messages" class="messages" aria-live="polite">
+          <div id="welcome" class="welcome">
+            <h2>Start a conversation</h2>
+            <p>Pick a model above and send a message. Code and markdown are rendered automatically.</p>
+          </div>
+        </main>
+        <button id="scroll-bottom" type="button" class="scroll-bottom hidden" title="Scroll to bottom">
+          ↓ New messages
+        </button>
+      </div>
 
       <footer class="composer">
         <form id="chat-form">
@@ -40,11 +55,15 @@
             required
           ></textarea>
           <button id="send-button" type="submit">Send</button>
+          <button id="stop-button" type="button" class="btn-stop hidden">Stop</button>
         </form>
         <p id="status" class="status"></p>
       </footer>
     </div>
 
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/15.0.7/marked.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.2.4/purify.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
     <script src="/static/app.js"></script>
   </body>
 </html>

@@ -73,6 +73,8 @@ async def chat(request: Request) -> StreamingResponse:
     async def stream_response():
         try:
             async for chunk in response.aiter_bytes():
+                if await request.is_disconnected():
+                    break
                 yield chunk
         finally:
             await response.aclose()
