@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Ada-SI Chat</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="header">
+        <div>
+          <h1>Ada-SI Chat</h1>
+          <p class="subtitle">Powered by LiteLLM</p>
+        </div>
+        <div class="model-picker">
+          <label for="model-select">Model</label>
+          <div class="model-row">
+            <select id="model-select" disabled>
+              <option value="">Loading models...</option>
+            </select>
+            <button id="refresh-models" type="button" title="Refresh models">↻</button>
+          </div>
+          <input
+            id="custom-model"
+            type="text"
+            placeholder="Or type a model id (e.g. openai/gpt-4o)"
+          />
+        </div>
+      </header>
+
+      <main id="messages" class="messages" aria-live="polite"></main>
+
+      <footer class="composer">
+        <form id="chat-form">
+          <textarea
+            id="message-input"
+            rows="2"
+            placeholder="Message the model..."
+            required
+          ></textarea>
+          <button id="send-button" type="submit">Send</button>
+        </form>
+        <p id="status" class="status"></p>
+      </footer>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
