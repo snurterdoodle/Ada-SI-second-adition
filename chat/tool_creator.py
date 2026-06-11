@@ -37,10 +37,13 @@ Each tool module MUST define exactly:
 Respond with ONLY valid JSON (no markdown fences) in this shape:
 {
   "tool_code": "<full Python module source>",
-  "test_code": "<test_run.py that imports /workspace/{tool_name}.py and asserts run() works>"
+  "test_code": "<test_run.py that imports /workspace/{tool_name}.py and asserts run() works>",
+  "requirements": ["optional-pip-package>=1.0"]
 }
 
 Rules:
+- requirements: list every PyPI package the tool needs at runtime (e.g. httpx, gTTS). Use [] if only stdlib.
+- Do NOT include pip, setuptools, or wheel in requirements.
 - tool_name must match the module filename stem
 - test_code runs inside python:3.12-slim with the tool mounted at /workspace/{tool_name}.py
 - test_run.py must exit 0 on success
@@ -61,6 +64,35 @@ def load_tool():
 
 # Use unittest.mock.patch on network/filesystem/subprocess before calling mod.run().
 # Sandbox has NO network access — never call mod.run() against real URLs without mocks."""
+
+EDIT_PLAN_SYSTEM_PROMPT = """You are an expert Python tool architect for a self-improving AI agent.
+
+The user wants to modify an EXISTING installed tool. Produce an updated implementation plan in markdown with these sections:
+## Architecture Changes
+## Function Schema
+## Execution Steps
+## Risks and Limitations
+
+Reference the current tool behavior and describe only what must change. Do not write full Python code yet."""
+
+EDIT_CODE_SYSTEM_PROMPT = """You are an expert Python developer updating an existing tool for a self-improving AI agent.
+
+Each tool module MUST define exactly:
+1. get_tool_schema() -> dict  (OpenAI-compatible function schema)
+2. run(**kwargs) -> str or JSON-serializable value
+
+Respond with ONLY valid JSON (no markdown fences) in this shape:
+{
+  "tool_code": "<full updated Python module source>",
+  "test_code": "<updated test_run.py>",
+  "requirements": ["optional-pip-package>=1.0"]
+}
+
+Rules:
+- Preserve tool_name as the module filename stem
+- requirements: full list of PyPI packages needed after your edit (not just new ones)
+- test_code runs in sandbox at /workspace/{tool_name}.py with mocks for network/filesystem
+- JSON string values MUST be valid JSON with escaped quotes and newlines"""
 
 FIX_TEST_SYSTEM_PROMPT = """You are an expert Python test engineer fixing sandbox test failures.
 
@@ -193,15 +225,19 @@ def _extract_json_object(text: str) -> dict:
         return json.loads(text[start : end + 1])
 
 
-def parse_generated_tool_response(raw: str) -> tuple[str, str]:
+def parse_generated_tool_response(raw: str) -> tuple[str, str, list[str]]:
     text = _strip_markdown_fences(raw)
     tool_code = ""
     test_code = ""
+    requirements: list[str] = []
 
     try:
         parsed = _extract_json_object(text)
         tool_code = str(parsed.get("tool_code", "")).strip()
         test_code = str(parsed.get("test_code", "")).strip()
+        raw_reqs = parsed.get("requirements") or []
+        if isinstance(raw_reqs, list):
+            requirements = [str(r).strip() for r in raw_reqs if str(r).strip()]
     except (ValueError, json.JSONDecodeError):
         tool_code = (_extract_json_string_value(text, "tool_code") or "").strip()
         test_code = (_extract_json_string_value(text, "test_code") or "").strip()
@@ -211,7 +247,7 @@ def parse_generated_tool_response(raw: str) -> tuple[str, str]:
             "Tool creator response missing tool_code or test_code. "
             "The model may have returned malformed JSON."
         )
-    return tool_code, test_code
+    return tool_code, test_code, requirements
 
 
 def validate_test_code(test_code: str) -> tuple[bool, str]:
@@ -295,18 +331,29 @@ async def generate_tool_code_stream(
     litellm_url: str,
     headers: dict[str, str],
     run_id: str = "",
+    edit_context: dict | None = None,
 ) -> AsyncIterator[tuple[str, str]]:
-    user_content = (
-        f"Tool name: `{tool_name}`\n\n"
-        f"Approved plan:\n{plan}\n\n"
-        f"Generate tool_code and test_code. The tool file will be saved as {tool_name}.py "
-        f"and mounted in the sandbox at /workspace/{tool_name}.py."
-    )
+    if edit_context:
+        user_content = (
+            f"Tool name: `{tool_name}` (existing tool — update in place)\n\n"
+            f"Approved edit plan:\n{plan}\n\n"
+            f"Current tool_code:\n```python\n{edit_context.get('tool_code', '')}\n```\n\n"
+            f"Current test_code:\n```python\n{edit_context.get('test_code', '')}\n```\n\n"
+            f"Current requirements: {edit_context.get('requirements', [])}\n\n"
+            f"Produce updated tool_code, test_code, and requirements."
+        )
+        system_prompt = EDIT_CODE_SYSTEM_PROMPT.replace("{tool_name}", tool_name)
+    else:
+        user_content = (
+            f"Tool name: `{tool_name}`\n\n"
+            f"Approved plan:\n{plan}\n\n"
+            f"Generate tool_code, test_code, and requirements. The tool file will be saved as {tool_name}.py "
+            f"and mounted in the sandbox at /workspace/{tool_name}.py."
+        )
+        system_prompt = CODE_SYSTEM_PROMPT.replace("{tool_name}", tool_name)
+
     messages = [
-        {
-            "role": "system",
-            "content": CODE_SYSTEM_PROMPT.replace("{tool_name}", tool_name),
-        },
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_content},
     ]
     log_debug(
@@ -351,6 +398,40 @@ async def draft_tool_plan(
     return plan
 
 
+async def draft_tool_edit_plan(
+    tool_name: str,
+    change_description: str,
+    existing_tool_code: str,
+    existing_requirements: list[str],
+    creator_model: str,
+    *,
+    litellm_url: str,
+    headers: dict[str, str],
+    run_id: str = "",
+) -> str:
+    user_content = (
+        f"Edit existing tool `{tool_name}`.\n\n"
+        f"Requested changes:\n{change_description}\n\n"
+        f"Current tool_code:\n```python\n{existing_tool_code}\n```\n\n"
+        f"Current requirements: {existing_requirements}"
+    )
+    messages = [
+        {"role": "system", "content": EDIT_PLAN_SYSTEM_PROMPT},
+        {"role": "user", "content": user_content},
+    ]
+    log_block(
+        run_id,
+        "PLAN",
+        f"edit plan request tool={tool_name} model={creator_model}",
+        change_description,
+    )
+    plan = await _litellm_chat(
+        litellm_url, headers, creator_model, messages, temperature=0.2
+    )
+    log_plan(run_id, tool_name=tool_name, plan=plan, action="edit_drafted")
+    return plan
+
+
 async def revise_tool_plan(
     tool_name: str,
     description: str,
@@ -388,7 +469,7 @@ async def generate_tool_code(
     *,
     litellm_url: str,
     headers: dict[str, str],
-) -> tuple[str, str]:
+) -> tuple[str, str, list[str]]:
     parts: list[str] = []
     async for kind, text in generate_tool_code_stream(
         plan,

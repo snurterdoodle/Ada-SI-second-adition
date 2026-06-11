@@ -5,7 +5,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py tools_engine.py sandbox.py tool_creator.py litellm_client.py debug_log.py ./
+COPY app.py tools_engine.py sandbox.py tool_creator.py litellm_client.py debug_log.py runtime_client.py build_pipeline.py ./
 RUN mkdir -p custom_tools staging
 COPY static ./static
 

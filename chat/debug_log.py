@@ -188,6 +188,37 @@ def log_build_event(
         log_info(run_id, f"BUILD/{phase}", message)
 
 
+def log_runtime_call(
+    run_id: str,
+    *,
+    action: str,
+    tool_name: str,
+    logs: str = "",
+    error: bool = False,
+) -> None:
+    level = logging.ERROR if error else logging.INFO
+    log_block(
+        run_id,
+        "RUNTIME",
+        f"{action} {tool_name}",
+        logs,
+        level=level,
+    )
+
+
+def log_pip_install(
+    run_id: str,
+    *,
+    packages: list[str],
+    logs: str = "",
+    approved: bool = False,
+    error: bool = False,
+) -> None:
+    title = f"pip install ({'approved' if approved else 'pending'}): {', '.join(packages)}"
+    level = logging.ERROR if error else logging.INFO
+    log_block(run_id, "PIP", title, logs, level=level)
+
+
 def log_sandbox(
     run_id: str,
     *,

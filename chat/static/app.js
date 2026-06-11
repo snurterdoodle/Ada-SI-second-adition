@@ -27,6 +27,8 @@ const BUILD_STEPS = [
   { step_id: "generate_code", label: "Generate tool code" },
   { step_id: "validate_code", label: "Validate module structure" },
   { step_id: "sandbox_test", label: "Run sandbox tests" },
+  { step_id: "pip_review", label: "Review pip packages" },
+  { step_id: "runtime_verify", label: "Verify in tool runtime" },
   { step_id: "install_tool", label: "Install tool" },
 ];
 
@@ -918,6 +920,8 @@ const VIEWER_PHASES = [
   { id: "generate_code", label: "Generate" },
   { id: "validate_code", label: "Validate" },
   { id: "sandbox_test", label: "Sandbox" },
+  { id: "pip_review", label: "Pip review" },
+  { id: "runtime_verify", label: "Runtime" },
   { id: "install_tool", label: "Install" },
 ];
 
@@ -1218,6 +1222,17 @@ function handleBuildSseEvent(json, viewerUi) {
     showToolCodeReady(viewerUi.codeUi, json);
     return false;
   }
+  if (json.ada_event === "pip_install_pending" && viewerUi) {
+    updateViewerPhase(viewerUi, "pip_review", "active");
+    const pkgList = (json.packages || []).join(", ");
+    appendViewerLog(
+      viewerUi,
+      `New pip packages require approval: ${pkgList}`,
+      "warn",
+    );
+    showViewerOutputTab(viewerUi);
+    return false;
+  }
   if (json.ada_event === "process_step" && viewerUi) {
     const mapped = VIEWER_PHASES.find((p) => p.id === json.step_id);
     if (mapped) updateViewerPhase(viewerUi, json.step_id, json.status);
@@ -1273,19 +1288,23 @@ function showToolCodeReady(codeUi, { tool_code, test_code }) {
   enhanceCodeBlocks(codeUi.panel);
 }
 
-function renderToolPlanCard({ plan_id, tool_name, plan, run_id }) {
+function renderToolPlanCard({ plan_id, tool_name, plan, run_id, kind }) {
   hideWelcome();
+
+  const isEdit = kind === "edit";
+  const badgeText = isEdit ? "Tool edit proposal" : "Tool proposal";
 
   const card = document.createElement("article");
   card.className = "tool-plan-card";
   card.dataset.planId = plan_id;
   card.dataset.toolName = tool_name;
   if (run_id) card.dataset.runId = run_id;
+  if (kind) card.dataset.planKind = kind;
 
   const header = document.createElement("div");
   header.className = "tool-plan-header";
   header.innerHTML = `
-    <span class="tool-plan-badge">Tool proposal</span>
+    <span class="tool-plan-badge${isEdit ? " tool-plan-badge-edit" : ""}">${escapeHtml(badgeText)}</span>
     <h3 class="tool-plan-title">${escapeHtml(tool_name)}</h3>
   `;
 
@@ -1371,6 +1390,205 @@ function renderToolPlanCard({ plan_id, tool_name, plan, run_id }) {
   scrollToBottom(true);
 }
 
+function renderPipInstallCard(buildCard, { pip_id, run_id, tool_name, packages, already_installed }) {
+  buildCard.querySelector(".pip-install-card")?.remove();
+
+  const section = document.createElement("div");
+  section.className = "pip-install-card";
+  section.dataset.pipId = pip_id;
+
+  const header = document.createElement("div");
+  header.className = "pip-install-header";
+  header.innerHTML = `
+    <span class="pip-install-badge">Pip install approval</span>
+    <h4 class="pip-install-title">${escapeHtml(tool_name || "Tool")}</h4>
+  `;
+
+  const body = document.createElement("div");
+  body.className = "pip-install-body";
+  const pkgItems = (packages || [])
+    .map((pkg) => `<li><code>${escapeHtml(pkg)}</code></li>`)
+    .join("");
+  const installedNote =
+    already_installed && already_installed.length
+      ? `<p class="pip-install-note">Already in shared venv: ${escapeHtml(already_installed.join(", "))}</p>`
+      : "";
+  body.innerHTML = `
+    <p>The tool build needs new Python packages in the shared tool runtime venv:</p>
+    <ul class="pip-install-packages">${pkgItems}</ul>
+    ${installedNote}
+    <p class="pip-install-warning">Approve only packages you trust. They persist in the shared environment.</p>
+  `;
+
+  const actions = document.createElement("div");
+  actions.className = "pip-install-actions";
+
+  const approveBtn = document.createElement("button");
+  approveBtn.type = "button";
+  approveBtn.className = "btn-primary";
+  approveBtn.textContent = "Approve pip install";
+
+  const rejectBtn = document.createElement("button");
+  rejectBtn.type = "button";
+  rejectBtn.className = "btn-ghost";
+  rejectBtn.textContent = "Reject";
+
+  approveBtn.addEventListener("click", () =>
+    runPipContinuation(buildCard, pip_id, run_id, approveBtn, rejectBtn),
+  );
+  rejectBtn.addEventListener("click", () =>
+    handlePipRejection(buildCard, pip_id, run_id, approveBtn, rejectBtn),
+  );
+
+  actions.appendChild(approveBtn);
+  actions.appendChild(rejectBtn);
+  section.appendChild(header);
+  section.appendChild(body);
+  section.appendChild(actions);
+
+  const footer = buildCard.querySelector(".tool-viewer-footer");
+  if (footer) {
+    buildCard.insertBefore(section, footer);
+  } else {
+    buildCard.appendChild(section);
+  }
+  scrollToBottom(true);
+}
+
+async function consumeBuildStream(response, viewerUi, card, planId) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let buildResult = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    buffer = parseSseChunks(buffer, (payload) => {
+      try {
+        const json = JSON.parse(payload);
+        if (handleAdaEvent(json)) {
+          /* process panel */
+        }
+        if (json.ada_event === "pip_install_pending") {
+          buildResult = { status: "pip_pending", ...json };
+          renderPipInstallCard(card, json);
+          return;
+        }
+        if (!handleBuildSseEvent(json, viewerUi)) return;
+
+        if (json.ada_event === "tool_installed") {
+          buildResult = { status: "success", ...json };
+        } else if (json.ada_event === "tool_build_failed") {
+          buildResult = { status: "failed", ...json };
+        }
+      } catch {
+        // Ignore malformed chunks.
+      }
+    });
+  }
+
+  return buildResult;
+}
+
+async function runPipContinuation(card, pipId, runId, approveBtn, rejectBtn) {
+  const viewerUi = card._viewerUi;
+  const planId = card.dataset.planId || "";
+  const effectiveRunId = runId || card.dataset.runId || "";
+  const controller = bindRunAbortController(effectiveRunId);
+
+  approveBtn.disabled = true;
+  rejectBtn.disabled = true;
+  card.querySelector(".pip-install-card")?.classList.add("pip-install-busy");
+  appendViewerLog(viewerUi, "Installing approved pip packages…");
+
+  let buildResult = null;
+
+  try {
+    const response = await fetch("/api/approve_pip", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pip_id: pipId, run_id: effectiveRunId }),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(parseErrorMessage(await response.text()));
+    }
+
+    buildResult = await consumeBuildStream(response, viewerUi, card, planId);
+    card.querySelector(".pip-install-card")?.remove();
+
+    if (buildResult?.status === "success") {
+      showViewerSuccess(card, viewerUi, buildResult.message);
+      conversation.push({
+        role: "assistant",
+        content: `[System] ${buildResult.message}`,
+      });
+      await loadConfig();
+      await refreshToolsPanel();
+      setStatus("");
+    } else if (buildResult?.status === "failed") {
+      const reason = buildResult.reason || "Build failed after pip install.";
+      appendViewerLog(viewerUi, reason, "error");
+      if (buildResult.logs) appendViewerLog(viewerUi, buildResult.logs, "error");
+      showViewerOutputTab(viewerUi);
+      viewerUi.retryBtn.classList.remove("hidden");
+      setToolPlanCardBusy(card, false);
+      setStatus("Tool verification failed.", true);
+    } else if (buildResult?.status === "pip_pending") {
+      setToolPlanCardBusy(card, false);
+      setStatus("Additional pip packages require approval.");
+    }
+  } catch (error) {
+    card.querySelector(".pip-install-card")?.classList.remove("pip-install-busy");
+    approveBtn.disabled = false;
+    rejectBtn.disabled = false;
+    if (error.name === "AbortError") {
+      appendViewerLog(viewerUi, "Pip install stopped by user.", "warn");
+      showViewerOutputTab(viewerUi);
+      return;
+    }
+    appendViewerLog(viewerUi, error.message, "error");
+    showViewerOutputTab(viewerUi);
+    setStatus(`Pip approval failed: ${error.message}`, true);
+  } finally {
+    runAbortControllers.delete(effectiveRunId);
+    if (abortController === controller) abortController = null;
+  }
+}
+
+async function handlePipRejection(card, pipId, runId, approveBtn, rejectBtn) {
+  approveBtn.disabled = true;
+  rejectBtn.disabled = true;
+  try {
+    const response = await fetch("/api/reject_pip", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pip_id: pipId, run_id: runId || card.dataset.runId || "" }),
+    });
+    if (!response.ok) {
+      throw new Error(parseErrorMessage(await response.text()));
+    }
+    card.querySelector(".pip-install-card")?.remove();
+    const viewerUi = card._viewerUi;
+    if (viewerUi) {
+      updateViewerPhase(viewerUi, "pip_review", "error");
+      appendViewerLog(viewerUi, "Pip install rejected — build cancelled.", "error");
+      showViewerOutputTab(viewerUi);
+      viewerUi.retryBtn.classList.remove("hidden");
+    }
+    setToolPlanCardBusy(card, false);
+    setStatus("Pip install rejected.");
+  } catch (error) {
+    approveBtn.disabled = false;
+    rejectBtn.disabled = false;
+    setStatus(`Reject failed: ${error.message}`, true);
+  }
+}
+
 async function runToolBuild(card, planId, runId) {
   const effectiveRunId = runId || card.dataset.runId || "";
   const toolName = card.dataset.toolName || card.querySelector(".tool-plan-title")?.textContent || "";
@@ -1400,33 +1618,7 @@ async function runToolBuild(card, planId, runId) {
       throw new Error(parseErrorMessage(await response.text()));
     }
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      buffer = parseSseChunks(buffer, (payload) => {
-        try {
-          const json = JSON.parse(payload);
-          if (handleAdaEvent(json)) {
-            /* process panel */
-          }
-          if (!handleBuildSseEvent(json, viewerUi)) return;
-
-          if (json.ada_event === "tool_installed") {
-            buildResult = { status: "success", ...json };
-          } else if (json.ada_event === "tool_build_failed") {
-            buildResult = { status: "failed", ...json };
-          }
-        } catch {
-          // Ignore malformed chunks.
-        }
-      });
-    }
+    buildResult = await consumeBuildStream(response, viewerUi, card, planId);
 
     if (buildResult?.status === "success") {
       showViewerSuccess(card, viewerUi, buildResult.message);
@@ -1437,6 +1629,9 @@ async function runToolBuild(card, planId, runId) {
       await loadConfig();
       await refreshToolsPanel();
       setStatus("");
+    } else if (buildResult?.status === "pip_pending") {
+      setToolPlanCardBusy(card, false);
+      setStatus("New pip packages require your approval.");
     } else if (buildResult?.status === "failed") {
       const reason = buildResult.reason || "Build failed.";
       const logs = buildResult.logs || "";

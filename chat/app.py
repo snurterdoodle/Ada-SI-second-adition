@@ -10,6 +10,13 @@ from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from build_pipeline import (
+    PENDING_PIP_INSTALLS,
+    get_pending_pip,
+    maybe_pause_for_pip_approval,
+    run_sandbox_phase,
+    stream_runtime_install,
+)
 from debug_log import (
     configure_logging,
     log_assistant_turn,
@@ -18,6 +25,7 @@ from debug_log import (
     log_debug,
     log_error,
     log_generated_code,
+    log_pip_install,
     log_sandbox,
     log_stream_delta,
     log_tool_execution,
@@ -32,8 +40,10 @@ from litellm_client import (
     stream_chat_completion,
     tool_calls_from_acc,
 )
+from runtime_client import runtime_health, set_runtime_url
 from sandbox import check_docker_available, verify_tool_in_sandbox
 from tool_creator import (
+    draft_tool_edit_plan,
     draft_tool_plan,
     fix_test_code,
     generate_tool_code_stream,
@@ -42,13 +52,16 @@ from tool_creator import (
     validate_test_code,
 )
 from tools_engine import (
-    delete_tool,
+    aload_dynamic_tools,
+    alist_tool_summaries,
+    delete_tool_async,
     execute_dynamic_tool,
-    list_tool_summaries,
-    load_dynamic_tools,
     prepare_agent_messages,
+    read_tool_file,
+    read_tool_requirements,
+    read_tool_test,
+    tool_exists,
     validate_tool_module,
-    write_tool,
 )
 
 configure_logging()
@@ -64,6 +77,9 @@ TOOL_CREATOR_MODEL = (
     os.environ.get("TOOL_CREATOR_MODEL", "").strip()
     or os.environ.get("SECOND_MODEL", "").strip()
 )
+TOOL_RUNTIME_URL = os.environ.get("TOOL_RUNTIME_URL", "http://tool-runtime:8090").rstrip(
+    "/"
+)
 
 STATIC_DIR = Path(__file__).parent / "static"
 MAX_TOOL_ITERATIONS = 5
@@ -78,11 +94,17 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 @app.on_event("startup")
 async def startup_check() -> None:
+    set_runtime_url(TOOL_RUNTIME_URL)
     available, reason = check_docker_available()
     if available:
         logger.info("Docker sandbox is available.")
     else:
         logger.warning("Docker sandbox unavailable: %s", reason)
+    runtime_ok, runtime_reason = await runtime_health()
+    if runtime_ok:
+        logger.info("Tool runtime is available at %s.", TOOL_RUNTIME_URL)
+    else:
+        logger.warning("Tool runtime unavailable: %s", runtime_reason)
 
 
 def litellm_headers() -> dict[str, str]:
@@ -279,7 +301,7 @@ async def run_agent_stream(
         run_id, "lite_model", "Lite model processing", "active", model=lite_model
     )
 
-    tools = load_dynamic_tools()
+    tools = await aload_dynamic_tools()
     working_messages = prepare_agent_messages(messages)
     tool_names = [
         (t.get("function") or t).get("name", "?") for t in tools
@@ -433,6 +455,116 @@ async def run_agent_stream(
                         "run_id": run_id,
                         "tool_name": tool_name,
                         "plan": plan,
+                        "kind": "create",
+                    }
+                    return
+
+                if name == "edit_existing_tool":
+                    tool_name = args.get("tool_name", "").strip()
+                    description = args.get("description", "").strip()
+                    log_tool_execution(
+                        run_id,
+                        name=name,
+                        arguments=args,
+                        result="(routing to tool editor)",
+                    )
+                    if not tool_name or not description:
+                        raise HTTPException(
+                            status_code=502,
+                            detail="edit_existing_tool missing tool_name or description.",
+                        )
+                    if not tool_exists(tool_name):
+                        raise HTTPException(
+                            status_code=404,
+                            detail=f"Tool '{tool_name}' is not installed.",
+                        )
+                    if not tool_creator_model:
+                        raise HTTPException(
+                            status_code=400,
+                            detail="No tool creator model configured. Select one in the UI.",
+                        )
+
+                    existing_code = read_tool_file(tool_name)
+                    existing_reqs = read_tool_requirements(tool_name)
+                    existing_test = read_tool_test(tool_name)
+
+                    yield process_step(
+                        run_id,
+                        "route_creator",
+                        "Routed to tool editor",
+                        "active",
+                        model=tool_creator_model,
+                    )
+                    yield process_step(
+                        run_id,
+                        "route_creator",
+                        "Routed to tool editor",
+                        "done",
+                        model=tool_creator_model,
+                    )
+                    yield process_step(
+                        run_id,
+                        "plan_draft",
+                        "Drafting tool edit plan",
+                        "active",
+                        model=tool_creator_model,
+                    )
+
+                    plan = await draft_tool_edit_plan(
+                        tool_name,
+                        description,
+                        existing_code,
+                        existing_reqs,
+                        tool_creator_model,
+                        litellm_url=LITELLM_URL,
+                        headers=litellm_headers(),
+                        run_id=run_id,
+                    )
+
+                    yield process_step(
+                        run_id,
+                        "plan_draft",
+                        "Drafting tool edit plan",
+                        "done",
+                        model=tool_creator_model,
+                    )
+                    yield process_step(
+                        run_id,
+                        "plan_ready",
+                        "Edit plan ready for approval",
+                        "done",
+                        detail=tool_name,
+                    )
+                    yield process_step(
+                        run_id,
+                        "awaiting_approval",
+                        "Awaiting your approval",
+                        "active",
+                        detail=tool_name,
+                    )
+
+                    plan_id = uuid.uuid4().hex
+                    PENDING_PLANS[plan_id] = {
+                        "kind": "edit",
+                        "tool_name": tool_name,
+                        "description": description,
+                        "plan": plan,
+                        "creator_model": tool_creator_model,
+                        "created_at": time.time(),
+                        "run_id": run_id,
+                        "edit_context": {
+                            "tool_code": existing_code,
+                            "requirements": existing_reqs,
+                            "test_code": existing_test,
+                        },
+                    }
+                    yield {
+                        "_event": "plan",
+                        "plan_id": plan_id,
+                        "run_id": run_id,
+                        "tool_name": tool_name,
+                        "plan": plan,
+                        "kind": "edit",
                     }
                     return
 
@@ -445,7 +577,7 @@ async def run_agent_stream(
                 )
 
                 try:
-                    result = execute_dynamic_tool(name, args, run_id=run_id)
+                    result = await execute_dynamic_tool(name, args, run_id=run_id)
                     log_tool_execution(
                         run_id, name=name, arguments=args, result=result
                     )
@@ -511,21 +643,23 @@ async def get_config() -> dict:
         "tool_creator_model": TOOL_CREATOR_MODEL,
         "chat_model": LITE_MODEL,
         "second_model": TOOL_CREATOR_MODEL,
-        "tools": list_tool_summaries(),
+        "tools": await alist_tool_summaries(),
         "docker_available": docker_ok,
         "docker_message": docker_message if not docker_ok else "",
+        "tool_runtime_available": (await runtime_health())[0],
+        "tool_runtime_url": TOOL_RUNTIME_URL,
     }
 
 
 @app.get("/api/tools")
 async def list_tools() -> dict:
-    return {"tools": list_tool_summaries()}
+    return {"tools": await alist_tool_summaries()}
 
 
 @app.delete("/api/tools/{tool_name}")
 async def remove_tool(tool_name: str) -> dict:
     try:
-        delete_tool(tool_name)
+        await delete_tool_async(tool_name)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -586,6 +720,7 @@ async def chat(request: Request) -> StreamingResponse:
                             "plan_id": item["plan_id"],
                             "tool_name": item["tool_name"],
                             "plan": item["plan"],
+                            "kind": item.get("kind", "create"),
                         }
                     )
                     yield "data: [DONE]\n\n"
@@ -698,6 +833,8 @@ async def approve_tool(request: Request, payload: dict = Body(...)) -> Streaming
                 yield event
             return
 
+        edit_context = plan_data.get("edit_context") if plan_data.get("kind") == "edit" else None
+
         accumulated = ""
         try:
             async for kind, delta in generate_tool_code_stream(
@@ -707,6 +844,7 @@ async def approve_tool(request: Request, payload: dict = Body(...)) -> Streaming
                 litellm_url=LITELLM_URL,
                 headers=litellm_headers(),
                 run_id=run_id,
+                edit_context=edit_context if plan_data.get("kind") == "edit" else None,
             ):
                 if await cancelled():
                     for event in cancelled_events(
@@ -732,7 +870,7 @@ async def approve_tool(request: Request, payload: dict = Body(...)) -> Streaming
                     }
                 )
 
-            tool_code, test_code = parse_generated_tool_response(accumulated)
+            tool_code, test_code, requirements = parse_generated_tool_response(accumulated)
             log_generated_code(
                 run_id,
                 tool_name=tool_name,
@@ -746,6 +884,7 @@ async def approve_tool(request: Request, payload: dict = Body(...)) -> Streaming
                     "tool_name": tool_name,
                     "tool_code": tool_code,
                     "test_code": test_code,
+                    "requirements": requirements,
                 }
             )
             yield blog("Code generated successfully.")
@@ -824,68 +963,33 @@ async def approve_tool(request: Request, payload: dict = Body(...)) -> Streaming
                 yield event
             return
 
-        sandbox_success = False
-        log_output = ""
-        for attempt in range(2):
-            if await cancelled():
-                for event in cancelled_events(run_id, "sandbox_test", model=creator_model):
-                    yield event
-                return
+        yield step("sandbox_test", "Running sandbox tests", "active")
+        yield phase("sandbox_test", "active")
+        yield blog("Running sandbox tests in isolated container (no network)…")
 
-            yield step("sandbox_test", "Running sandbox tests", "active")
-            yield phase("sandbox_test", "active")
-            if attempt == 0:
-                yield blog("Running sandbox tests in isolated container (no network)…")
-            else:
-                yield blog("Retrying sandbox tests with auto-fixed test_code…")
+        sandbox_success, log_output, test_code = await run_sandbox_phase(
+            run_id=run_id,
+            tool_name=tool_name,
+            tool_code=tool_code,
+            test_code=test_code,
+            creator_model=creator_model,
+            litellm_url=LITELLM_URL,
+            headers=litellm_headers(),
+            step=step,
+            phase=phase,
+            blog=blog,
+            sse_data=sse_data,
+            cancelled=cancelled,
+        )
+        log_sandbox(
+            run_id,
+            tool_name=tool_name,
+            success=sandbox_success,
+            logs=log_output,
+            attempt=0,
+        )
 
-            sandbox_success, log_output = verify_tool_in_sandbox(
-                tool_name, tool_code, test_code
-            )
-            log_sandbox(
-                run_id,
-                tool_name=tool_name,
-                success=sandbox_success,
-                logs=log_output,
-                attempt=attempt,
-            )
-
-            if sandbox_success:
-                yield step("sandbox_test", "Running sandbox tests", "done")
-                yield phase("sandbox_test", "done")
-                yield blog("Sandbox tests passed.")
-                break
-
-            yield blog(log_output, level="error")
-
-            if attempt == 0:
-                yield blog(
-                    "Sandbox failed — asking tool creator to fix test_code (one retry)…"
-                )
-                try:
-                    test_code = await fix_test_code(
-                        tool_name,
-                        tool_code,
-                        test_code,
-                        log_output,
-                        creator_model,
-                        litellm_url=LITELLM_URL,
-                        headers=litellm_headers(),
-                        run_id=run_id,
-                    )
-                    yield sse_data(
-                        {
-                            "ada_event": "tool_code_ready",
-                            "run_id": run_id,
-                            "tool_name": tool_name,
-                            "tool_code": tool_code,
-                            "test_code": test_code,
-                        }
-                    )
-                    continue
-                except Exception as exc:
-                    yield blog(f"Auto-fix of test_code failed: {exc}", level="error")
-
+        if not sandbox_success:
             yield step(
                 "sandbox_test",
                 "Running sandbox tests",
@@ -893,6 +997,7 @@ async def approve_tool(request: Request, payload: dict = Body(...)) -> Streaming
                 detail=log_output[:500],
             )
             yield phase("sandbox_test", "error", detail=log_output[:200])
+            yield blog(log_output, level="error")
             yield sse_data(
                 {
                     "ada_event": "tool_build_failed",
@@ -905,40 +1010,149 @@ async def approve_tool(request: Request, payload: dict = Body(...)) -> Streaming
             yield "data: [DONE]\n\n"
             return
 
+        yield step("sandbox_test", "Running sandbox tests", "done")
+        yield phase("sandbox_test", "done")
+        yield blog("Sandbox tests passed.")
+
         yield step("install_tool", "Installing tool", "active")
         yield phase("install_tool", "active")
-        yield blog("Installing tool…")
 
-        if await cancelled():
-            for event in cancelled_events(run_id, "install_tool", model=creator_model):
+        paused, pause_events, new_packages = await maybe_pause_for_pip_approval(
+            run_id=run_id,
+            plan_id=plan_id,
+            tool_name=tool_name,
+            tool_code=tool_code,
+            test_code=test_code,
+            requirements=requirements,
+            creator_model=creator_model,
+            step=step,
+            phase=phase,
+            sse_data=sse_data,
+        )
+        if paused and pause_events:
+            log_pip_install(run_id, packages=new_packages, logs="awaiting user approval")
+            async for event in pause_events:
                 yield event
             return
 
-        write_tool(tool_name, tool_code)
+        async for event in stream_runtime_install(
+            run_id=run_id,
+            plan_id=plan_id,
+            tool_name=tool_name,
+            tool_code=tool_code,
+            test_code=test_code,
+            requirements=requirements,
+            new_packages=new_packages,
+            creator_model=creator_model,
+            litellm_url=LITELLM_URL,
+            litellm_headers=litellm_headers(),
+            step=step,
+            phase=phase,
+            blog=blog,
+            sse_data=sse_data,
+            cancelled=cancelled,
+            skip_pip=True,
+        ):
+            yield event
+
         del PENDING_PLANS[plan_id]
         clear_run_cancelled(run_id)
-        log_build_event(
-            run_id,
-            phase="install_tool",
-            message=f"installed {tool_name} at custom_tools/{tool_name}.py",
-        )
-
-        yield step("install_tool", "Installing tool", "done")
-        yield phase("install_tool", "done")
-        yield blog("Tool installed successfully.")
-        yield sse_data(
-            {
-                "ada_event": "tool_installed",
-                "run_id": run_id,
-                "tool_name": tool_name,
-                "message": f"Tool '{tool_name}' successfully added to the active model context.",
-            }
-        )
-        yield "data: [DONE]\n\n"
 
     return StreamingResponse(
         approval_stream(), media_type="text/event-stream", headers=SSE_HEADERS
     )
+
+
+@app.post("/api/approve_pip")
+async def approve_pip(request: Request, payload: dict = Body(...)) -> StreamingResponse:
+    pip_id = payload.get("pip_id", "").strip()
+    run_id = payload.get("run_id", "").strip()
+    if not pip_id:
+        raise HTTPException(status_code=400, detail="pip_id is required.")
+
+    try:
+        pip_data = get_pending_pip(pip_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    run_id = run_id or pip_data.get("run_id", "")
+    plan_id = pip_data.get("plan_id", "")
+    tool_name = pip_data["tool_name"]
+    creator_model = pip_data.get("creator_model", "")
+
+    async def pip_stream():
+        clear_run_cancelled(run_id)
+
+        def step(step_id: str, label: str, status: str, *, detail: str = ""):
+            if not run_id:
+                return ""
+            return process_step(
+                run_id,
+                step_id,
+                label,
+                status,
+                model=creator_model,
+                detail=detail,
+            )
+
+        def phase(step_id: str, status: str, *, detail: str = ""):
+            if not run_id:
+                return ""
+            return tool_build_phase(run_id, step_id, status, detail=detail)
+
+        def blog(message: str, *, level: str = "info"):
+            if not run_id:
+                return ""
+            return tool_build_log(run_id, message, level=level)
+
+        async def cancelled() -> bool:
+            return is_run_cancelled(run_id) or await request.is_disconnected()
+
+        yield step("pip_review", "Awaiting pip install approval", "done")
+
+        async for event in stream_runtime_install(
+            run_id=run_id,
+            plan_id=plan_id,
+            tool_name=tool_name,
+            tool_code=pip_data["tool_code"],
+            test_code=pip_data["test_code"],
+            requirements=pip_data.get("requirements", []),
+            new_packages=pip_data.get("packages", []),
+            creator_model=creator_model,
+            litellm_url=LITELLM_URL,
+            litellm_headers=litellm_headers(),
+            step=step,
+            phase=phase,
+            blog=blog,
+            sse_data=sse_data,
+            cancelled=cancelled,
+            skip_pip=False,
+        ):
+            yield event
+
+        PENDING_PIP_INSTALLS.pop(pip_id, None)
+        if plan_id in PENDING_PLANS:
+            del PENDING_PLANS[plan_id]
+        clear_run_cancelled(run_id)
+
+    return StreamingResponse(pip_stream(), media_type="text/event-stream", headers=SSE_HEADERS)
+
+
+@app.post("/api/reject_pip")
+async def reject_pip(payload: dict = Body(...)) -> dict:
+    pip_id = payload.get("pip_id", "").strip()
+    if not pip_id:
+        raise HTTPException(status_code=400, detail="pip_id is required.")
+    if pip_id in PENDING_PIP_INSTALLS:
+        data = PENDING_PIP_INSTALLS.pop(pip_id)
+        log_pip_install(
+            data.get("run_id", ""),
+            packages=data.get("packages", []),
+            logs="rejected by user",
+            approved=False,
+        )
+        return {"status": "rejected", "pip_id": pip_id}
+    raise HTTPException(status_code=404, detail="Pip install request not found.")
 
 
 @app.post("/api/revise_tool")

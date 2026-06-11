@@ -20,6 +20,25 @@ services:
       start_period: 30s
     restart: unless-stopped
 
+  tool-runtime:
+    build: ./tool_runtime
+    container_name: ada-tools
+    volumes:
+      - ./chat/custom_tools:/app/custom_tools
+      - ada_tool_venv:/app/venv
+    environment:
+      - TOOLS_DIR=/app/custom_tools
+      - VENV_PATH=/app/venv
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8090/health')"
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
   chat:
     build: ./chat
     container_name: ada-chat
@@ -36,9 +55,15 @@ services:
       - TOOL_CREATOR_MODEL=${TOOL_CREATOR_MODEL:-}
       - CHAT_MODEL=${CHAT_MODEL:-}
       - SECOND_MODEL=${SECOND_MODEL:-}
+      - TOOL_RUNTIME_URL=http://tool-runtime:8090
       - ADA_LOG_LEVEL=${ADA_LOG_LEVEL:-INFO}
       - ADA_LOG_MAX_BODY=${ADA_LOG_MAX_BODY:-32000}
     depends_on:
       litellm:
         condition: service_healthy
+      tool-runtime:
+        condition: service_healthy
     restart: unless-stopped
+
+volumes:
+  ada_tool_venv:
