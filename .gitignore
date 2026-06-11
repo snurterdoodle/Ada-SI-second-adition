@@ -2,3 +2,7 @@
 __pycache__/
 *.pyc
 .Python
+chat/staging/*
+!chat/staging/.gitkeep
+chat/custom_tools/*.py
+!chat/custom_tools/.gitkeep

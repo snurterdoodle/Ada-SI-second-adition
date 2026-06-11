@@ -25,9 +25,19 @@ services:
     container_name: ada-chat
     ports:
       - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./chat/custom_tools:/app/custom_tools
+      - ./chat/staging:/app/staging
     environment:
       - LITELLM_URL=http://litellm:4000
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+      - LITE_MODEL=${LITE_MODEL:-}
+      - TOOL_CREATOR_MODEL=${TOOL_CREATOR_MODEL:-}
+      - CHAT_MODEL=${CHAT_MODEL:-}
+      - SECOND_MODEL=${SECOND_MODEL:-}
+      - ADA_LOG_LEVEL=${ADA_LOG_LEVEL:-INFO}
+      - ADA_LOG_MAX_BODY=${ADA_LOG_MAX_BODY:-32000}
     depends_on:
       litellm:
         condition: service_healthy

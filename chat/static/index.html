@@ -4,6 +4,12 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Ada-SI Chat</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
     <link
       rel="stylesheet"
       href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/github-dark.min.css"
@@ -11,54 +17,144 @@
     <link rel="stylesheet" href="/static/style.css" />
   </head>
   <body>
-    <div class="app">
-      <header class="header">
-        <div class="header-left">
-          <h1>Ada-SI Chat</h1>
-          <p class="subtitle">Powered by LiteLLM</p>
-          <button id="new-chat" type="button" class="btn-secondary">New chat</button>
-        </div>
-        <div class="model-picker">
-          <label for="model-select">Model</label>
-          <div class="model-row">
-            <select id="model-select" disabled>
-              <option value="">Loading models...</option>
-            </select>
-            <button id="refresh-models" type="button" title="Refresh models">↻</button>
+    <div class="app-shell">
+      <aside id="process-panel" class="side-panel process-panel glass-panel">
+        <div class="panel-header">
+          <div class="panel-title-row">
+            <h2>Process</h2>
+            <span id="process-run-count" class="panel-badge hidden">0</span>
           </div>
-          <input
-            id="custom-model"
-            type="text"
-            placeholder="Or type a model id (e.g. openai/gpt-4o)"
-          />
         </div>
-      </header>
+        <div id="process-runs" class="process-runs scroll-area">
+          <div class="empty-state">
+            <div class="empty-state-icon" aria-hidden="true">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/>
+                <circle cx="12" cy="12" r="4"/>
+              </svg>
+            </div>
+            <p class="empty-state-title">No activity yet</p>
+            <p class="empty-state-text">Your routing timeline appears here as the agent works.</p>
+          </div>
+        </div>
+      </aside>
 
-      <div class="messages-wrap">
-        <main id="messages" class="messages" aria-live="polite">
-          <div id="welcome" class="welcome">
-            <h2>Start a conversation</h2>
-            <p>Pick a model above and send a message. Code and markdown are rendered automatically.</p>
+      <div class="main-column">
+        <header class="header glass-panel">
+          <div class="toolbar">
+            <div class="toolbar-brand" title="Ada-SI · Powered by LiteLLM">
+              <span class="brand-mark" aria-hidden="true">A</span>
+              <span class="brand-name">Ada-SI</span>
+            </div>
+
+            <div class="toolbar-models">
+              <div class="model-picker model-picker-compact">
+                <label for="chat-model-select">Lite model</label>
+                <select id="chat-model-select" disabled>
+                  <option value="">Loading...</option>
+                </select>
+              </div>
+              <div class="model-picker model-picker-compact">
+                <label for="second-model-select">Tool creator</label>
+                <select id="second-model-select" disabled>
+                  <option value="">Loading...</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="toolbar-actions">
+              <button
+                id="refresh-models"
+                type="button"
+                class="btn-icon"
+                title="Refresh models"
+                aria-label="Refresh models"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
+                  <path d="M21 3v6h-6"/>
+                </svg>
+              </button>
+              <button id="new-chat" type="button" class="btn-secondary btn-sm">New chat</button>
+            </div>
           </div>
-        </main>
-        <button id="scroll-bottom" type="button" class="scroll-bottom hidden" title="Scroll to bottom">
-          ↓ New messages
-        </button>
+
+          <details id="system-panel" class="system-panel">
+            <summary>System instructions</summary>
+            <label class="sr-only" for="system-input">System instructions</label>
+            <textarea
+              id="system-input"
+              rows="2"
+              placeholder="Optional instructions for the model..."
+            ></textarea>
+          </details>
+        </header>
+
+        <div class="chat-surface glass-panel">
+          <div class="messages-wrap">
+            <main id="messages" class="messages scroll-area" aria-live="polite">
+              <div id="welcome" class="welcome">
+                <div class="welcome-mark" aria-hidden="true">A</div>
+                <h2>What would you like to build?</h2>
+                <p>Chat with the lite model or request new tools for the agent to create.</p>
+                <div class="welcome-chips">
+                  <span class="welcome-chip">Ask a question</span>
+                  <span class="welcome-chip">Request a new tool</span>
+                  <span class="welcome-chip">Run an installed tool</span>
+                </div>
+              </div>
+            </main>
+            <button id="scroll-bottom" type="button" class="scroll-bottom hidden" title="Scroll to bottom">
+              ↓ New messages
+            </button>
+          </div>
+
+          <footer class="composer">
+            <form id="chat-form" class="composer-form">
+              <div class="composer-input-wrap">
+                <textarea
+                  id="message-input"
+                  rows="1"
+                  placeholder="Message the model..."
+                  required
+                ></textarea>
+              </div>
+              <button id="send-button" type="submit" class="btn-send" title="Send message" aria-label="Send message">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                  <path d="M12 19V5M5 12l7-7 7 7"/>
+                </svg>
+              </button>
+              <button id="stop-button" type="button" class="btn-stop-round hidden" title="Stop generation" aria-label="Stop generation">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                  <rect x="6" y="6" width="12" height="12" rx="1"/>
+                </svg>
+              </button>
+            </form>
+            <p id="status" class="status"></p>
+          </footer>
+        </div>
       </div>
 
-      <footer class="composer">
-        <form id="chat-form">
-          <textarea
-            id="message-input"
-            rows="2"
-            placeholder="Message the model..."
-            required
-          ></textarea>
-          <button id="send-button" type="submit">Send</button>
-          <button id="stop-button" type="button" class="btn-stop hidden">Stop</button>
-        </form>
-        <p id="status" class="status"></p>
-      </footer>
+      <aside id="tools-panel" class="side-panel tools-panel glass-panel">
+        <div class="panel-header">
+          <div class="panel-title-row">
+            <h2>Tools</h2>
+            <span id="tools-count" class="panel-badge">0</span>
+          </div>
+        </div>
+        <div id="tools-list" class="tools-list scroll-area">
+          <div class="empty-state">
+            <div class="empty-state-icon" aria-hidden="true">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77A6 6 0 0 1 21 12v0a6 6 0 0 1-6 6H6a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h1"/>
+                <path d="M16 2l4 4"/>
+              </svg>
+            </div>
+            <p class="empty-state-title">No tools yet</p>
+            <p class="empty-state-text">Approved tools appear here automatically.</p>
+          </div>
+        </div>
+      </aside>
     </div>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/15.0.7/marked.min.js"></script>
