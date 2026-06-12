@@ -20,6 +20,7 @@ import type {
   ToolSummary,
 } from '../types/events'
 import { createDefaultViewerPhases, createToolPlanCard } from '../types/events'
+import { onSkillInstalled } from './progressionActions'
 import { createFeedId } from '../utils/id'
 
 type SidePanelTab = 'tools' | 'packages'
@@ -461,7 +462,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         get().collapseToolPlan(
           item.id,
           card.lastSuccessMessage || '',
-          'Installed',
+          'Bound',
           'success',
         )
       } else if (card.mode === 'pending') {
@@ -498,12 +499,16 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   showViewerSuccess: (id, message) => {
+    const item = get().feed.find(
+      (f) => f.id === id && f.type === 'tool-plan',
+    ) as ToolPlanFeedItem | undefined
+    const toolName = item?.card.toolName || 'New Skill'
     const phases = Object.fromEntries(
       VIEWER_PHASES.map((p) => [p.id, 'done' as PhaseStatus]),
     )
     get().updateToolPlanCard(id, {
       viewerPhases: phases,
-      viewerOutput: [...(get().feed.find((f) => f.id === id && f.type === 'tool-plan') as ToolPlanFeedItem)?.card.viewerOutput || [], message],
+      viewerOutput: [...(item?.card.viewerOutput || []), message],
       codePanelTitle: 'Complete',
       codeTab: 'output',
       showCodeTabs: true,
@@ -512,7 +517,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       mode: 'success',
       busy: false,
     })
-    get().collapseToolPlan(id, message, 'Installed', 'success')
+    get().collapseToolPlan(id, message, 'Bound', 'success')
+    onSkillInstalled(toolName)
   },
 }))
 

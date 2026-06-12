@@ -12,8 +12,8 @@ function ToolsEmptyState() {
           <path d="M16 2l4 4" />
         </svg>
       </div>
-      <p className="empty-state-title">No tools yet</p>
-      <p className="empty-state-text">Approved tools appear here automatically.</p>
+      <p className="empty-state-title">No skills yet</p>
+      <p className="empty-state-text">Forged skills appear here automatically.</p>
     </div>
   )
 }

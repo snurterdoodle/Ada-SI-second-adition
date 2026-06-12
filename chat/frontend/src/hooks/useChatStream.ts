@@ -6,6 +6,8 @@ import {
   isAdaEvent,
   type AdaEvent,
 } from '../types/events'
+import { audioManager } from '../audio/AudioManager'
+import { awardChatTurnXp } from '../state/progressionActions'
 import { buildMessages, useAppStore } from '../state/store'
 
 export function useChatStream() {
@@ -136,6 +138,8 @@ export function useChatStream() {
 
       store.setIsSending(true)
       store.setStatus('')
+      audioManager.unlock()
+      void audioManager.play('send')
       store.pushConversation({ role: 'user', content })
       store.addUserMessage(content)
 
@@ -157,6 +161,7 @@ export function useChatStream() {
             if (isAdaEvent(json)) {
               if (handleAdaEvent(json)) return
               if (json.ada_event === 'chat_error') {
+                void audioManager.play('error')
                 throw new Error(json.detail || 'Chat failed.')
               }
               if (json.ada_event === 'tool_plan_draft_started') {
@@ -218,6 +223,8 @@ export function useChatStream() {
             })
             if (finalContent) {
               store.pushConversation({ role: 'assistant', content: finalContent })
+              awardChatTurnXp(finalContent.length)
+              void audioManager.play('receive')
             }
           }
           store.setStatus('')
@@ -249,6 +256,7 @@ export function useChatStream() {
         } else {
           store.removeFeedItem(assistantId)
           store.popConversation()
+          void audioManager.play('error')
           store.setStatus(`Chat failed: ${err.message}`, true)
         }
       } finally {
@@ -278,7 +286,7 @@ export function useChatStream() {
         store.setIsSending(false)
         store.setAbortController(null)
       }
-      store.setStatus('Process stopped.')
+      store.setStatus('Quest stopped.')
       return
     }
     abortController?.abort()

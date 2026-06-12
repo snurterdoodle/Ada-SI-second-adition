@@ -12,8 +12,8 @@ function ProcessEmptyState() {
           <circle cx="12" cy="12" r="4" />
         </svg>
       </div>
-      <p className="empty-state-title">No activity yet</p>
-      <p className="empty-state-text">Your routing timeline appears here as the agent works.</p>
+      <p className="empty-state-title">No active quests</p>
+      <p className="empty-state-text">Your quest timeline appears here as ADA works.</p>
     </div>
   )
 }
@@ -37,14 +37,14 @@ export function ProcessPanel() {
       setAbortController(null)
       setIsSending(false)
     }
-    setStatus('Process stopped.')
+    setStatus('Quest stopped.')
   }
 
   return (
-    <aside className="side-panel process-panel glass-panel">
+    <aside className="side-panel process-panel holo-panel">
       <div className="panel-header">
         <div className="panel-title-row">
-          <h2>Process</h2>
+          <h2>Quest Log</h2>
           {processRuns.length > 0 && (
             <span className="panel-badge">{processRuns.length}</span>
           )}

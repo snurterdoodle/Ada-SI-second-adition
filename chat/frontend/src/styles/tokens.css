@@ -1,40 +1,76 @@
 :root {
   color-scheme: dark;
-  --bg: #0b0d12;
-  --bg-elevated: rgba(22, 26, 36, 0.85);
-  --glass: rgba(23, 27, 38, 0.55);
-  --glass-border: rgba(255, 255, 255, 0.06);
-  --glass-highlight: rgba(255, 255, 255, 0.04);
-  --panel: rgba(22, 26, 36, 0.72);
-  --border: rgba(255, 255, 255, 0.08);
-  --text: #e8ecf3;
-  --muted: #8b95a8;
-  --accent: #5b8cff;
-  --accent-hover: #7aa2ff;
-  --accent-soft: rgba(91, 140, 255, 0.12);
-  --success: #3ecf8e;
-  --success-soft: rgba(62, 207, 142, 0.15);
-  --danger: #ff6b6b;
-  --danger-soft: rgba(255, 107, 107, 0.12);
-  --stop: #e05a5a;
-  --stop-hover: #f07070;
-  --user-bg: rgba(91, 140, 255, 0.1);
-  --assistant-bg: rgba(255, 255, 255, 0.03);
-  --thinking: rgba(255, 255, 255, 0.02);
-  --code-bg: #0d1117;
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25);
-  --shadow-md: 0 8px 32px rgba(0, 0, 0, 0.35);
-  --shadow-glow: 0 0 24px rgba(91, 140, 255, 0.12);
+
+  /* Space backdrop */
+  --bg: #05070f;
+  --bg-elevated: rgba(8, 12, 24, 0.92);
+  --glass: rgba(10, 16, 32, 0.65);
+  --glass-border: rgba(34, 211, 238, 0.12);
+  --glass-highlight: rgba(34, 211, 238, 0.06);
+  --panel: rgba(8, 14, 28, 0.78);
+  --border: rgba(34, 211, 238, 0.1);
+
+  /* Text */
+  --text: #e8f4ff;
+  --muted: #7a8fa8;
+
+  /* Holo palette */
+  --cyan: #22d3ee;
+  --cyan-dim: rgba(34, 211, 238, 0.55);
+  --cyan-soft: rgba(34, 211, 238, 0.12);
+  --violet: #a855f7;
+  --violet-soft: rgba(168, 85, 247, 0.14);
+  --gold: #fbbf24;
+  --gold-soft: rgba(251, 191, 36, 0.18);
+
+  /* Semantic aliases */
+  --accent: var(--cyan);
+  --accent-hover: #67e8f9;
+  --accent-soft: var(--cyan-soft);
+  --success: #34d399;
+  --success-soft: rgba(52, 211, 153, 0.15);
+  --danger: #f87171;
+  --danger-soft: rgba(248, 113, 113, 0.12);
+  --stop: #ef4444;
+  --stop-hover: #f87171;
+
+  /* Message bubbles */
+  --user-bg: rgba(34, 211, 238, 0.08);
+  --user-border: rgba(34, 211, 238, 0.25);
+  --assistant-bg: rgba(168, 85, 247, 0.06);
+  --assistant-border: rgba(168, 85, 247, 0.2);
+  --thinking: rgba(168, 85, 247, 0.04);
+  --code-bg: #060a14;
+
+  /* Shadows & glow */
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 8px 32px rgba(0, 0, 0, 0.5);
+  --shadow-glow: 0 0 24px rgba(34, 211, 238, 0.15);
+  --shadow-glow-violet: 0 0 24px rgba(168, 85, 247, 0.12);
+  --shadow-glow-gold: 0 0 32px rgba(251, 191, 36, 0.2);
+
+  /* Typography */
+  --font-display: "Orbitron", "Segoe UI", sans-serif;
+  --font-label: "Rajdhani", "Segoe UI", sans-serif;
+  --font-body: "Inter", "Segoe UI", system-ui, sans-serif;
   --text-xs: 0.75rem;
   --text-sm: 0.8125rem;
   --text-base: 0.9375rem;
   --text-lg: 1.125rem;
-  --radius-sm: 8px;
-  --radius-md: 12px;
-  --radius-lg: 16px;
-  --radius-xl: 20px;
+
+  /* Radii — angular holo frames use clip-path, but keep tokens for chips */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+
+  /* Motion */
   --ease: cubic-bezier(0.4, 0, 0.2, 1);
   --duration: 180ms;
+
+  /* Layout */
+  --core-stage-height: 200px;
+  --core-stage-height-expanded: 260px;
   --tool-card-max-h: min(72vh, calc(100vh - 12rem));
 }
 
@@ -44,18 +80,61 @@
 
 body {
   margin: 0;
-  font-family: "Inter", "Segoe UI", system-ui, sans-serif;
+  font-family: var(--font-body);
   font-size: var(--text-base);
-  background:
-    radial-gradient(ellipse 80% 50% at 20% -10%, rgba(91, 140, 255, 0.08), transparent),
-    radial-gradient(ellipse 60% 40% at 90% 10%, rgba(62, 207, 142, 0.04), transparent),
-    var(--bg);
+  background-color: var(--bg);
+  background-image:
+    radial-gradient(ellipse 120% 80% at 50% 100%, rgba(34, 211, 238, 0.04), transparent 60%),
+    radial-gradient(ellipse 80% 50% at 20% -10%, rgba(168, 85, 247, 0.06), transparent),
+    radial-gradient(ellipse 60% 40% at 90% 10%, rgba(34, 211, 238, 0.04), transparent),
+    linear-gradient(rgba(34, 211, 238, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(34, 211, 238, 0.03) 1px, transparent 1px);
+  background-size:
+    100% 100%,
+    100% 100%,
+    100% 100%,
+    48px 48px,
+    48px 48px;
+  background-position:
+    center,
+    center,
+    center,
+    center bottom,
+    center bottom;
   color: var(--text);
   min-height: 100vh;
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
 }
 
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    radial-gradient(1px 1px at 10% 20%, rgba(255, 255, 255, 0.35), transparent),
+    radial-gradient(1px 1px at 30% 65%, rgba(255, 255, 255, 0.25), transparent),
+    radial-gradient(1px 1px at 55% 15%, rgba(255, 255, 255, 0.3), transparent),
+    radial-gradient(1px 1px at 72% 45%, rgba(255, 255, 255, 0.2), transparent),
+    radial-gradient(1px 1px at 88% 78%, rgba(255, 255, 255, 0.25), transparent),
+    radial-gradient(1px 1px at 45% 88%, rgba(255, 255, 255, 0.15), transparent);
+  opacity: 0.6;
+  z-index: 0;
+}
+
 #root {
   height: 100vh;
+  position: relative;
+  z-index: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

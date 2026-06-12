@@ -14,12 +14,12 @@ type ToolPlanCardProps = {
 
 function getBadgeText(card: ToolPlanCardState): string {
   if (card.mode === 'draft') {
-    return card.kind === 'edit' ? 'Drafting tool edit plan' : 'Drafting tool plan'
+    return card.kind === 'edit' ? 'Drafting skill revision' : 'Drafting skill blueprint'
   }
   if (card.mode === 'building' || card.mode === 'success') {
-    return 'Tool Creation Viewer'
+    return 'Skill Forge'
   }
-  return card.kind === 'edit' ? 'Tool edit proposal' : 'Tool proposal'
+  return card.kind === 'edit' ? 'Skill revision proposal' : 'Skill blueprint'
 }
 
 export function ToolPlanCard({ feedId, card }: ToolPlanCardProps) {

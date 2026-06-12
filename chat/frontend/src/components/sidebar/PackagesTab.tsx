@@ -11,9 +11,9 @@ function PackagesEmptyState() {
           <path d="M3.27 6.96 12 12.01l8.73-5.05M12 22.08V12" />
         </svg>
       </div>
-      <p className="empty-state-title">No approved packages yet</p>
+      <p className="empty-state-title">No modules yet</p>
       <p className="empty-state-text">
-        Packages appear here after you approve pip installs during tool builds.
+        Modules appear here after you approve pip installs during skill forging.
       </p>
     </div>
   )

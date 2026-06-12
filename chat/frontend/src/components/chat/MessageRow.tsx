@@ -31,8 +31,8 @@ export function MessageRow({ item }: MessageRowProps) {
   }
 
   return (
-    <div className="message-row assistant-row">
-      <span className="message-avatar assistant-avatar">AI</span>
+    <div className={`message-row assistant-row${item.streaming ? ' streaming' : ''}`}>
+      <span className="message-avatar assistant-avatar">ADA</span>
       <article className="message assistant">
         <div className="message-header">
           <div className="message-actions">
