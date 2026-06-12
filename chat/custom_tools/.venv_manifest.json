@@ -1,0 +1,5 @@
+{
+  "approved_packages": [
+    "gTTS>=2.3.2"
+  ]
+}

@@ -10,11 +10,16 @@ from typing import Any, Callable
 from debug_log import log_build_event, log_pip_install, log_runtime_call
 from runtime_client import runtime_install_tool, runtime_pip_install
 from sandbox import verify_tool_in_sandbox
-from tool_creator import fix_test_code, validate_test_code
+from tool_creator import (
+    fix_runtime_failure,
+    fix_test_code,
+    validate_test_code,
+)
 from tools_engine import get_new_packages_for_requirements, validate_tool_module, write_tool_files
 
 PENDING_PIP_INSTALLS: dict[str, dict] = {}
 PIP_TTL_SECONDS = 3600
+PHASE_MAX_RETRIES = 2
 
 
 def cleanup_expired_pip_installs() -> None:
@@ -60,26 +65,48 @@ async def stream_runtime_install(
     if new_packages and not skip_pip:
         yield step("pip_review", "Installing approved pip packages", "active")
         yield phase("pip_review", "active")
-        try:
-            pip_log = await runtime_pip_install(new_packages)
-            log_pip_install(run_id, packages=new_packages, logs=pip_log, approved=True)
-            yield blog(f"Installed pip packages: {', '.join(new_packages)}")
-        except Exception as exc:
+        pip_log = ""
+        pip_error: Exception | None = None
+        for pip_attempt in range(PHASE_MAX_RETRIES):
+            try:
+                pip_log = await runtime_pip_install(new_packages)
+                pip_error = None
+                break
+            except Exception as exc:
+                pip_error = exc
+                if pip_attempt < PHASE_MAX_RETRIES - 1:
+                    log_pip_install(
+                        run_id,
+                        packages=new_packages,
+                        logs=str(exc),
+                        approved=True,
+                        error=True,
+                    )
+                    yield blog(
+                        f"Pip install failed (attempt {pip_attempt + 1}) — retrying…",
+                        level="warn",
+                    )
+                    continue
+        if pip_error is not None:
             log_pip_install(
-                run_id, packages=new_packages, logs=str(exc), approved=True, error=True
+                run_id, packages=new_packages, logs=str(pip_error), approved=True, error=True
             )
-            yield step("pip_review", "Installing approved pip packages", "error", detail=str(exc))
-            yield phase("pip_review", "error", detail=str(exc))
+            yield step(
+                "pip_review", "Installing approved pip packages", "error", detail=str(pip_error)
+            )
+            yield phase("pip_review", "error", detail=str(pip_error))
             yield sse_data(
                 {
                     "ada_event": "tool_build_failed",
                     "run_id": run_id,
                     "tool_name": tool_name,
-                    "reason": f"Pip install failed: {exc}",
+                    "reason": f"Pip install failed: {pip_error}",
                 }
             )
             yield "data: [DONE]\n\n"
             return
+        log_pip_install(run_id, packages=new_packages, logs=pip_log, approved=True)
+        yield blog(f"Installed pip packages: {', '.join(new_packages)}")
         yield step("pip_review", "Installing approved pip packages", "done")
         yield phase("pip_review", "done")
 
@@ -90,29 +117,83 @@ async def stream_runtime_install(
     yield phase("runtime_verify", "active")
     yield blog("Installing tool in persistent runtime and running tests…")
 
-    try:
-        logs = await runtime_install_tool(
-            tool_name,
-            tool_code,
-            test_code,
-            requirements,
-            skip_pip=True,
+    current_tool = tool_code
+    current_test = test_code
+    runtime_error: Exception | None = None
+    runtime_logs = ""
+
+    for runtime_attempt in range(PHASE_MAX_RETRIES):
+        if await cancelled():
+            return
+        try:
+            runtime_logs = await runtime_install_tool(
+                tool_name,
+                current_tool,
+                current_test,
+                requirements,
+                skip_pip=True,
+            )
+            log_runtime_call(run_id, action="install", tool_name=tool_name, logs=runtime_logs)
+            write_tool_files(tool_name, current_tool, requirements, current_test)
+            tool_code = current_tool
+            test_code = current_test
+            runtime_error = None
+            yield blog("Runtime verification passed.")
+            break
+        except Exception as exc:
+            runtime_logs = str(exc)
+            runtime_error = exc
+            log_runtime_call(
+                run_id, action="install", tool_name=tool_name, logs=runtime_logs, error=True
+            )
+            if runtime_attempt < PHASE_MAX_RETRIES - 1:
+                yield blog(
+                    f"Runtime verification failed (attempt {runtime_attempt + 1}) — "
+                    "auto-fixing code/tests…",
+                    level="warn",
+                )
+                try:
+                    current_tool, current_test = await fix_runtime_failure(
+                        tool_name,
+                        current_tool,
+                        current_test,
+                        runtime_logs,
+                        creator_model,
+                        litellm_url=litellm_url,
+                        headers=litellm_headers,
+                        run_id=run_id,
+                    )
+                    yield sse_data(
+                        {
+                            "ada_event": "tool_code_ready",
+                            "run_id": run_id,
+                            "tool_name": tool_name,
+                            "tool_code": current_tool,
+                            "test_code": current_test,
+                            "requirements": requirements,
+                        }
+                    )
+                    continue
+                except Exception as fix_exc:
+                    runtime_error = fix_exc
+                    break
+
+    if runtime_error is not None:
+        yield step(
+            "runtime_verify",
+            "Verifying in tool runtime",
+            "error",
+            detail=str(runtime_error)[:500],
         )
-        log_runtime_call(run_id, action="install", tool_name=tool_name, logs=logs)
-        write_tool_files(tool_name, tool_code, requirements, test_code)
-        yield blog("Runtime verification passed.")
-    except Exception as exc:
-        log_runtime_call(
-            run_id, action="install", tool_name=tool_name, logs=str(exc), error=True
-        )
-        yield step("runtime_verify", "Verifying in tool runtime", "error", detail=str(exc))
-        yield phase("runtime_verify", "error", detail=str(exc))
+        yield phase("runtime_verify", "error", detail=str(runtime_error)[:200])
+        yield blog(runtime_logs, level="error")
         yield sse_data(
             {
                 "ada_event": "tool_build_failed",
                 "run_id": run_id,
                 "tool_name": tool_name,
-                "reason": f"Runtime verification failed: {exc}",
+                "reason": f"Runtime verification failed: {runtime_error}",
+                "logs": runtime_logs,
             }
         )
         yield "data: [DONE]\n\n"
@@ -211,23 +292,31 @@ async def run_sandbox_phase(
     blog: Callable[..., str],
     sse_data: Callable[[dict], str],
     cancelled: Callable[[], Any],
-) -> tuple[bool, str, str]:
-    """Run sandbox with one auto-retry. Returns (success, log_output, test_code)."""
+) -> tuple[bool, str, str, str, list[tuple[str, str]]]:
+    """Run sandbox with auto-retry. Returns (success, logs, test_code, tool_code, notices)."""
     log_output = ""
     current_test = test_code
-    for attempt in range(2):
+    current_tool = tool_code
+    notices: list[tuple[str, str]] = []
+    for attempt in range(PHASE_MAX_RETRIES):
         if await cancelled():
-            return False, log_output, current_test
+            return False, log_output, current_test, current_tool, notices
 
-        success, log_output = verify_tool_in_sandbox(tool_name, tool_code, current_test)
+        success, log_output = verify_tool_in_sandbox(tool_name, current_tool, current_test)
         if success:
-            return True, log_output, current_test
+            return True, log_output, current_test, current_tool, notices
 
-        if attempt == 0:
+        if attempt < PHASE_MAX_RETRIES - 1:
+            notices.append(
+                (
+                    "warn",
+                    f"Sandbox failed (attempt {attempt + 1}) — auto-fixing test_code…",
+                )
+            )
             try:
                 current_test = await fix_test_code(
                     tool_name,
-                    tool_code,
+                    current_tool,
                     current_test,
                     log_output,
                     creator_model,
@@ -238,5 +327,5 @@ async def run_sandbox_phase(
                 continue
             except Exception:
                 pass
-        return False, log_output, current_test
-    return False, log_output, current_test
+        return False, log_output, current_test, current_tool, notices
+    return False, log_output, current_test, current_tool, notices

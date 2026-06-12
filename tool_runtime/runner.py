@@ -77,6 +77,15 @@ def pip_install(requirements: list[str]) -> tuple[bool, str]:
     return True, output
 
 
+def _is_tool_module(file: Path) -> bool:
+    name = file.name
+    if name.startswith("__") or name.startswith("."):
+        return False
+    if name.endswith(".test.py"):
+        return False
+    return True
+
+
 def _load_module_from_file(file: Path):
     spec = importlib.util.spec_from_file_location(file.stem, file)
     if spec is None or spec.loader is None:
@@ -86,17 +95,59 @@ def _load_module_from_file(file: Path):
     return mod
 
 
+def _run_in_venv(
+    script: str, *args: str, timeout: int = 120, allow_empty: bool = False
+) -> str:
+    ensure_venv()
+    py = venv_python()
+    runner_path = TOOLS_DIR / ".venv_runner.py"
+    try:
+        runner_path.write_text(script, encoding="utf-8")
+        proc = subprocess.run(
+            [str(py), str(runner_path), *args],
+            cwd=str(TOOLS_DIR),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        if proc.returncode != 0:
+            detail = ((proc.stdout or "") + (proc.stderr or "")).strip()
+            raise RuntimeError(detail or f"venv runner exited with {proc.returncode}")
+        output = (proc.stdout or "").strip()
+        if not output and not allow_empty:
+            raise RuntimeError("venv runner returned no output.")
+        return output
+    finally:
+        if runner_path.exists():
+            runner_path.unlink()
+
+
 def list_tools() -> list[dict]:
     summaries: list[dict] = []
     ensure_venv()
+    schema_script = """import importlib.util
+import json
+import sys
+from pathlib import Path
+
+tool_file = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location(tool_file.stem, tool_file)
+if spec is None or spec.loader is None:
+    raise ImportError(f"Cannot load {tool_file}")
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+if not hasattr(mod, "get_tool_schema"):
+    sys.exit(0)
+print(json.dumps(mod.get_tool_schema()))
+"""
     for file in sorted(TOOLS_DIR.glob("*.py")):
-        if file.name.startswith("__"):
+        if not _is_tool_module(file):
             continue
         try:
-            mod = _load_module_from_file(file)
-            if not hasattr(mod, "get_tool_schema"):
+            raw = _run_in_venv(schema_script, str(file), timeout=30, allow_empty=True)
+            if not raw:
                 continue
-            schema = mod.get_tool_schema()
+            schema = json.loads(raw)
             fn = schema.get("function", schema)
             summaries.append(
                 {
@@ -114,13 +165,26 @@ def run_tool(name: str, arguments: dict) -> str:
     file = TOOLS_DIR / f"{name}.py"
     if not file.exists():
         raise FileNotFoundError(f"Tool '{name}' not found.")
-    mod = _load_module_from_file(file)
-    if not hasattr(mod, "run"):
-        raise ValueError(f"Tool '{name}' has no run() function.")
-    result = mod.run(**arguments)
-    if isinstance(result, str):
-        return result
-    return json.dumps(result)
+    run_script = """import importlib.util
+import json
+import sys
+from pathlib import Path
+
+tool_file = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location(tool_file.stem, tool_file)
+if spec is None or spec.loader is None:
+    raise ImportError(f"Cannot load {tool_file}")
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+if not hasattr(mod, "run"):
+    raise ValueError("Tool has no run() function.")
+result = mod.run(**json.loads(sys.argv[2]))
+if isinstance(result, str):
+    print(result)
+else:
+    print(json.dumps(result))
+"""
+    return _run_in_venv(run_script, str(file), json.dumps(arguments))
 
 
 def verify_tool_in_runtime(tool_name: str, test_code: str) -> tuple[bool, str]:

@@ -7,6 +7,7 @@ import httpx
 
 from litellm_client import build_completion_payload, stream_completion_deltas
 from debug_log import log_block, log_debug, log_generated_code, log_plan, log_stream_delta
+from tools_engine import validate_tool_module
 
 PLAN_SYSTEM_PROMPT = """You are an expert Python tool architect for a self-improving AI agent.
 
@@ -50,6 +51,7 @@ Rules:
 - No network, filesystem outside /workspace, or subprocess calls in generated tools during tests
 - Keep tools minimal and focused
 - JSON string values MUST be valid JSON: escape every double quote inside code as \\", newlines as \\n, backslashes as \\\\
+- ALL file paths in run() return values MUST use the /workspace/ prefix (never /app/custom_tools/)
 - test_code MUST use this exact load pattern and mock external calls:
 
 import importlib.util
@@ -92,6 +94,7 @@ Rules:
 - Preserve tool_name as the module filename stem
 - requirements: full list of PyPI packages needed after your edit (not just new ones)
 - test_code runs in sandbox at /workspace/{tool_name}.py with mocks for network/filesystem
+- ALL file paths in run() return values MUST use /workspace/ prefix
 - JSON string values MUST be valid JSON with escaped quotes and newlines"""
 
 FIX_TEST_SYSTEM_PROMPT = """You are an expert Python test engineer fixing sandbox test failures.
@@ -106,7 +109,44 @@ Respond with ONLY valid JSON (no markdown fences):
 Rules:
 - Use importlib.util.spec_from_file_location to load the tool from /workspace/{tool_name}.py
 - Mock ALL network, filesystem, and subprocess calls with unittest.mock.patch
+- Assert paths using /workspace/ prefix when checking run() return values
 - test_run.py must exit 0 when run as: python /workspace/test_run.py"""
+
+FIX_CODEGEN_SYSTEM_PROMPT = """You repair malformed tool-creator JSON responses.
+
+Return ONLY valid JSON (no markdown fences):
+{{ "tool_code": "...", "test_code": "...", "requirements": [] }}
+
+Rules:
+- tool_code must define get_tool_schema() and run()
+- test_code loads tool from /workspace/{tool_name}.py via importlib
+- requirements is a list of PyPI package strings (or [])
+- ALL file paths in run() returns use /workspace/ prefix
+- Escape quotes and newlines properly inside JSON strings"""
+
+FIX_VALIDATION_SYSTEM_PROMPT = """You fix Python tool modules that failed static validation.
+
+Return ONLY valid JSON (no markdown fences):
+{{ "tool_code": "...", "test_code": "..." }}
+
+Rules:
+- tool_code MUST define get_tool_schema() and run()
+- test_code MUST load via importlib from /workspace/{tool_name}.py and include tests/mocks
+- ALL file paths in run() return values use /workspace/ prefix
+- Fix only what validation requires; keep behavior from the plan"""
+
+FIX_RUNTIME_SYSTEM_PROMPT = """You fix tool_code and/or test_code failures in the persistent tool runtime.
+
+Tests run with cwd=/app/custom_tools and /workspace symlinked to the same directory.
+Load tools via importlib from /workspace/{tool_name}.py.
+
+Respond with ONLY valid JSON (no markdown fences):
+{{ "tool_code": "...", "test_code": "..." }}
+
+Rules:
+- Fix path mismatches: use /workspace/ in run() return values AND test assertions
+- Mock network/subprocess in test_code; runtime has network but tests must not call live APIs
+- tool_code must keep get_tool_schema() and run()"""
 
 
 async def _litellm_chat(
@@ -275,6 +315,146 @@ def validate_test_code(test_code: str) -> tuple[bool, str]:
     if not has_tests:
         return False, "test_code must include assertions or unittest cases."
     return True, ""
+
+
+async def repair_generated_tool_response(
+    plan: str,
+    tool_name: str,
+    raw_response: str,
+    error_message: str,
+    creator_model: str,
+    *,
+    litellm_url: str,
+    headers: dict[str, str],
+    run_id: str = "",
+    edit_context: dict | None = None,
+) -> tuple[str, str, list[str]]:
+    log_debug(run_id, "CODE_FIX", f"repairing codegen JSON model={creator_model}")
+    user_content = (
+        f"Tool name: `{tool_name}`\n\n"
+        f"Plan:\n{plan}\n\n"
+        f"Parse error: {error_message}\n\n"
+        f"Malformed model output:\n```\n{raw_response[:12000]}\n```\n\n"
+        f"Return corrected tool_code, test_code, and requirements."
+    )
+    if edit_context:
+        user_content += (
+            f"\n\nEditing existing tool. Prior tool_code length: "
+            f"{len(edit_context.get('tool_code', ''))}"
+        )
+    messages = [
+        {
+            "role": "system",
+            "content": FIX_CODEGEN_SYSTEM_PROMPT.replace("{tool_name}", tool_name),
+        },
+        {"role": "user", "content": user_content},
+    ]
+    raw = await _litellm_chat(
+        litellm_url, headers, creator_model, messages, temperature=0.1
+    )
+    tool_code, test_code, requirements = parse_generated_tool_response(raw)
+    log_generated_code(
+        run_id,
+        tool_name=tool_name,
+        tool_code=tool_code,
+        test_code=test_code,
+        source="repair_codegen",
+    )
+    return tool_code, test_code, requirements
+
+
+async def fix_validation_errors(
+    tool_name: str,
+    tool_code: str,
+    test_code: str,
+    validation_error: str,
+    creator_model: str,
+    *,
+    litellm_url: str,
+    headers: dict[str, str],
+    run_id: str = "",
+) -> tuple[str, str]:
+    log_debug(run_id, "CODE_FIX", f"fixing validation errors model={creator_model}")
+    user_content = (
+        f"Tool name: `{tool_name}`\n\n"
+        f"Validation error:\n{validation_error}\n\n"
+        f"Current tool_code:\n```python\n{tool_code}\n```\n\n"
+        f"Current test_code:\n```python\n{test_code}\n```\n\n"
+        f"Return fixed tool_code and test_code."
+    )
+    messages = [
+        {
+            "role": "system",
+            "content": FIX_VALIDATION_SYSTEM_PROMPT.replace("{tool_name}", tool_name),
+        },
+        {"role": "user", "content": user_content},
+    ]
+    raw = await _litellm_chat(
+        litellm_url, headers, creator_model, messages, temperature=0.1
+    )
+    parsed = _extract_json_object(raw)
+    fixed_tool = str(parsed.get("tool_code", "")).strip() or tool_code
+    fixed_test = str(parsed.get("test_code", "")).strip() or test_code
+    if not validate_tool_module(fixed_tool):
+        raise ValueError("Fixed tool_code still missing get_tool_schema() or run().")
+    ok, reason = validate_test_code(fixed_test)
+    if not ok:
+        raise ValueError(f"Fixed test_code still invalid: {reason}")
+    log_generated_code(
+        run_id,
+        tool_name=tool_name,
+        tool_code=fixed_tool,
+        test_code=fixed_test,
+        source="fix_validation",
+    )
+    return fixed_tool, fixed_test
+
+
+async def fix_runtime_failure(
+    tool_name: str,
+    tool_code: str,
+    test_code: str,
+    runtime_logs: str,
+    creator_model: str,
+    *,
+    litellm_url: str,
+    headers: dict[str, str],
+    run_id: str = "",
+) -> tuple[str, str]:
+    log_debug(run_id, "CODE_FIX", f"fixing runtime failure model={creator_model}")
+    user_content = (
+        f"Tool name: `{tool_name}`\n\n"
+        f"Current tool_code:\n```python\n{tool_code}\n```\n\n"
+        f"Current test_code:\n```python\n{test_code}\n```\n\n"
+        f"Runtime test failure output:\n```\n{runtime_logs}\n```\n\n"
+        f"Return fixed tool_code and test_code."
+    )
+    messages = [
+        {
+            "role": "system",
+            "content": FIX_RUNTIME_SYSTEM_PROMPT.replace("{tool_name}", tool_name),
+        },
+        {"role": "user", "content": user_content},
+    ]
+    raw = await _litellm_chat(
+        litellm_url, headers, creator_model, messages, temperature=0.1
+    )
+    parsed = _extract_json_object(raw)
+    fixed_tool = str(parsed.get("tool_code", "")).strip() or tool_code
+    fixed_test = str(parsed.get("test_code", "")).strip() or test_code
+    if not validate_tool_module(fixed_tool):
+        raise ValueError("Fixed tool_code still missing get_tool_schema() or run().")
+    ok, reason = validate_test_code(fixed_test)
+    if not ok:
+        raise ValueError(f"Fixed test_code still invalid: {reason}")
+    log_generated_code(
+        run_id,
+        tool_name=tool_name,
+        tool_code=fixed_tool,
+        test_code=fixed_test,
+        source="fix_runtime",
+    )
+    return fixed_tool, fixed_test
 
 
 async def fix_test_code(

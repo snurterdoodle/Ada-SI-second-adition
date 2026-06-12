@@ -914,6 +914,8 @@ function updateToolPlanCardContent(card, plan) {
   enhanceCodeBlocks(body);
   const feedbackInput = card.querySelector(".tool-plan-feedback textarea");
   if (feedbackInput) feedbackInput.value = "";
+  updateScrollShadow(card);
+  focusActiveToolCard(card, { collapseOthers: false });
 }
 
 const VIEWER_PHASES = [
@@ -924,6 +926,210 @@ const VIEWER_PHASES = [
   { id: "runtime_verify", label: "Runtime" },
   { id: "install_tool", label: "Install" },
 ];
+
+function getToolCardShell(card) {
+  return {
+    summary: card.querySelector(".tool-card-summary"),
+    chrome: card.querySelector(".tool-card-chrome"),
+    attention: card.querySelector(".tool-card-attention"),
+    scroll: card.querySelector(".tool-card-scroll"),
+    actions: card.querySelector(".tool-card-actions"),
+  };
+}
+
+function ensureToolCardShell(card) {
+  const existing = getToolCardShell(card);
+  if (existing.scroll) return existing;
+
+  const summary = document.createElement("div");
+  summary.className = "tool-card-summary hidden";
+
+  const chrome = document.createElement("div");
+  chrome.className = "tool-card-chrome";
+
+  const attention = document.createElement("div");
+  attention.className = "tool-card-attention";
+
+  const scroll = document.createElement("div");
+  scroll.className = "tool-card-scroll scroll-area";
+
+  const actions = document.createElement("div");
+  actions.className = "tool-card-actions";
+
+  const shellClasses = [
+    "tool-card-summary",
+    "tool-card-chrome",
+    "tool-card-attention",
+    "tool-card-scroll",
+    "tool-card-actions",
+  ];
+
+  const toMove = [...card.children].filter(
+    (child) => !shellClasses.some((cls) => child.classList.contains(cls)),
+  );
+
+  card.prepend(summary, chrome, attention, scroll, actions);
+
+  for (const child of toMove) {
+    if (
+      child.classList.contains("tool-plan-header") ||
+      child.classList.contains("tool-viewer-phases")
+    ) {
+      chrome.appendChild(child);
+    } else if (child.classList.contains("pip-install-card")) {
+      attention.appendChild(child);
+    } else if (
+      child.classList.contains("tool-plan-actions") ||
+      child.classList.contains("tool-viewer-footer") ||
+      child.classList.contains("tool-plan-result")
+    ) {
+      actions.appendChild(child);
+    } else {
+      scroll.appendChild(child);
+    }
+  }
+
+  attachScrollShadowListener(card);
+  return getToolCardShell(card);
+}
+
+function attachScrollShadowListener(card) {
+  const scroll = card.querySelector(".tool-card-scroll");
+  if (!scroll || scroll.dataset.shadowBound) return;
+  scroll.dataset.shadowBound = "1";
+  scroll.addEventListener("scroll", () => updateScrollShadow(card));
+  if (typeof ResizeObserver !== "undefined") {
+    new ResizeObserver(() => updateScrollShadow(card)).observe(scroll);
+  }
+}
+
+function updateScrollShadow(card) {
+  const scroll = card.querySelector(".tool-card-scroll");
+  if (!scroll) return;
+  scroll.classList.toggle("has-scroll", scroll.scrollHeight > scroll.clientHeight + 2);
+}
+
+function scrollCardRegion(card, selector) {
+  if (!card) return;
+  const region = card.querySelector(selector);
+  if (region) {
+    region.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+}
+
+function expandToolCard(card) {
+  card.classList.remove("tool-card-collapsed");
+  card.classList.add("tool-card-active");
+  card.querySelector(".tool-card-summary")?.classList.add("hidden");
+  focusActiveToolCard(card, { collapseOthers: false });
+}
+
+function collapseToolCard(
+  card,
+  { summary = "", status = "Done", statusClass = "success" } = {},
+) {
+  ensureToolCardShell(card);
+  card.classList.remove("tool-card-active");
+  card.classList.add("tool-card-collapsed");
+
+  const toolName =
+    card.dataset.toolName ||
+    card.querySelector(".tool-plan-title")?.textContent ||
+    "Tool";
+
+  let summaryEl = card.querySelector(".tool-card-summary");
+  if (!summaryEl) return;
+
+  summaryEl.replaceChildren();
+
+  const nameSpan = document.createElement("span");
+  nameSpan.className = "tool-card-summary-name";
+  nameSpan.textContent = toolName;
+
+  const badge = document.createElement("span");
+  badge.className = `tool-card-summary-badge status-${statusClass}`;
+  badge.textContent = status;
+
+  const summaryActions = document.createElement("div");
+  summaryActions.className = "tool-card-summary-actions";
+
+  const expandBtn = document.createElement("button");
+  expandBtn.type = "button";
+  expandBtn.className = "btn-secondary btn-sm";
+  expandBtn.textContent = "Expand";
+  expandBtn.addEventListener("click", () => expandToolCard(card));
+
+  const dismissBtn = document.createElement("button");
+  dismissBtn.type = "button";
+  dismissBtn.className = "btn-ghost btn-sm";
+  dismissBtn.textContent = "Dismiss";
+  dismissBtn.addEventListener("click", () => card.remove());
+
+  summaryActions.appendChild(expandBtn);
+  summaryActions.appendChild(dismissBtn);
+
+  summaryEl.appendChild(nameSpan);
+  summaryEl.appendChild(badge);
+  if (summary) {
+    const detail = document.createElement("span");
+    detail.className = "tool-card-summary-detail";
+    detail.textContent =
+      summary.length > 120 ? `${summary.slice(0, 120)}…` : summary;
+    summaryEl.appendChild(detail);
+  }
+  summaryEl.appendChild(summaryActions);
+  summaryEl.classList.remove("hidden");
+}
+
+function collapseOtherToolCards(exceptCard) {
+  document.querySelectorAll(".tool-plan-card").forEach((card) => {
+    if (card === exceptCard || card.classList.contains("tool-card-collapsed")) {
+      return;
+    }
+    if (card.classList.contains("tool-creation-viewer-success")) {
+      collapseToolCard(card, {
+        summary: card._lastSuccessMessage || "",
+        status: "Installed",
+        statusClass: "success",
+      });
+      return;
+    }
+    if (
+      card.classList.contains("tool-creation-viewer") &&
+      !card.classList.contains("tool-creation-viewer-success")
+    ) {
+      return;
+    }
+    if (!card.classList.contains("tool-creation-viewer")) {
+      collapseToolCard(card, {
+        status: "Plan pending",
+        statusClass: "pending",
+      });
+    }
+  });
+}
+
+function focusActiveToolCard(card, { collapseOthers = true } = {}) {
+  if (!card) return;
+  if (collapseOthers) collapseOtherToolCards(card);
+
+  document.querySelectorAll(".tool-plan-card.tool-card-active").forEach((c) => {
+    if (c !== card && !c.classList.contains("tool-card-collapsed")) {
+      c.classList.remove("tool-card-active");
+    }
+  });
+
+  card.classList.remove("tool-card-collapsed");
+  card.querySelector(".tool-card-summary")?.classList.add("hidden");
+  card.classList.add("tool-card-active");
+  ensureToolCardShell(card);
+
+  requestAnimationFrame(() => {
+    card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    scrollCardRegion(card, ".tool-card-actions, .pip-install-actions");
+    updateScrollShadow(card);
+  });
+}
 
 function setToolPlanCardBusy(card, busy) {
   card.querySelectorAll("button, textarea").forEach((el) => {
@@ -1085,18 +1291,26 @@ function createViewerPhaseStrip() {
 }
 
 function buildViewerUi(card) {
+  const shell = ensureToolCardShell(card);
+
   let phases = reuseViewerPhases(card);
   if (!phases) {
     phases = createViewerPhaseStrip();
+    shell.chrome.appendChild(phases.strip);
+  } else if (!shell.chrome.contains(phases.strip)) {
+    shell.chrome.appendChild(phases.strip);
   }
+  dedupeViewerPhaseStrips(card, phases.strip);
 
   const codeUi = card._codeUi || createToolPlanCodePanel();
-  if (!card._codeUi && !card.contains(codeUi.panel)) {
-    card.appendChild(codeUi.panel);
+  if (!card._codeUi) {
     card._codeUi = codeUi;
   }
+  if (!shell.scroll.contains(codeUi.panel)) {
+    shell.scroll.appendChild(codeUi.panel);
+  }
 
-  let footer = card.querySelector(".tool-viewer-footer");
+  let footer = shell.actions.querySelector(".tool-viewer-footer");
   let retryBtn;
   if (!footer) {
     footer = document.createElement("div");
@@ -1107,18 +1321,12 @@ function buildViewerUi(card) {
     retryBtn.textContent = "Retry Build";
     retryBtn.classList.add("hidden");
     footer.appendChild(retryBtn);
-    card.appendChild(footer);
+    shell.actions.appendChild(footer);
   } else {
     retryBtn = footer.querySelector("button");
   }
 
-  const codePanel = codeUi.panel;
-  if (!card.contains(phases.strip)) {
-    card.insertBefore(phases.strip, codePanel);
-  }
-  dedupeViewerPhaseStrips(card, phases.strip);
-
-  card.querySelectorAll(".tool-viewer-footer").forEach((el) => {
+  shell.actions.querySelectorAll(".tool-viewer-footer").forEach((el) => {
     if (el !== footer) el.remove();
   });
 
@@ -1127,6 +1335,7 @@ function buildViewerUi(card) {
     codeUi,
     footer,
     retryBtn,
+    card,
     outputLines: card._viewerUi?.outputLines || [],
   };
 }
@@ -1134,6 +1343,12 @@ function buildViewerUi(card) {
 function enterToolCreationViewer(card, toolName) {
   card.classList.add("tool-creation-viewer");
   card.dataset.toolName = toolName;
+
+  const shell = ensureToolCardShell(card);
+  const header = card.querySelector(".tool-plan-header");
+  if (header && !shell.chrome.contains(header)) {
+    shell.chrome.prepend(header);
+  }
 
   const badge = card.querySelector(".tool-plan-badge");
   if (badge) badge.textContent = "Tool Creation Viewer";
@@ -1143,7 +1358,7 @@ function enterToolCreationViewer(card, toolName) {
 
   card.querySelector(".tool-plan-body-wrap")?.remove();
   card.querySelector(".tool-plan-feedback")?.remove();
-  card.querySelector(".tool-plan-actions")?.remove();
+  shell.actions.querySelector(".tool-plan-actions")?.remove();
   card.querySelector(".tool-plan-result")?.classList.add("hidden");
 
   const viewerUi = buildViewerUi(card);
@@ -1162,6 +1377,7 @@ function enterToolCreationViewer(card, toolName) {
   viewerUi.footer.classList.remove("hidden");
   viewerUi.retryBtn.classList.add("hidden");
   showToolPlanCodePanel(viewerUi.codeUi);
+  focusActiveToolCard(card, { collapseOthers: true });
 
   return viewerUi;
 }
@@ -1197,17 +1413,36 @@ function showViewerSuccess(card, viewerUi, message) {
     viewerUi.codeUi.panelTitle.textContent = "Complete";
     viewerUi.retryBtn.classList.add("hidden");
   }
+  card._lastSuccessMessage = message;
   card.classList.add("tool-creation-viewer-success");
+  card.classList.remove("tool-card-pip-active");
+  collapseToolCard(card, {
+    summary: message,
+    status: "Installed",
+    statusClass: "success",
+  });
 }
 
-function handleBuildSseEvent(json, viewerUi) {
+function handleBuildSseEvent(json, viewerUi, card) {
+  const activeCard = card || viewerUi?.card;
   if (json.ada_event === "tool_build_phase" && viewerUi) {
     updateViewerPhase(viewerUi, json.phase, json.status);
+    if (
+      activeCard &&
+      (json.status === "error" ||
+        json.phase === "pip_review" ||
+        json.phase === "runtime_verify")
+    ) {
+      scrollCardRegion(activeCard, ".tool-card-actions, .pip-install-actions");
+    }
     return false;
   }
   if (json.ada_event === "tool_build_log" && viewerUi) {
     appendViewerLog(viewerUi, json.message, json.level || "info");
-    if (json.level === "error") showViewerOutputTab(viewerUi);
+    if (json.level === "error") {
+      showViewerOutputTab(viewerUi);
+      scrollCardRegion(activeCard, ".tool-card-actions");
+    }
     return false;
   }
   if (json.ada_event === "tool_code_thinking_delta" && viewerUi?.codeUi) {
@@ -1379,19 +1614,24 @@ function renderToolPlanCard({ plan_id, tool_name, plan, run_id, kind }) {
   actions.appendChild(reviseBtn);
   actions.appendChild(discardBtn);
 
-  card.appendChild(header);
-  card.appendChild(bodyWrap);
-  card.appendChild(codeUi.panel);
-  card.appendChild(feedbackSection);
-  card.appendChild(actions);
-  card.appendChild(resultEl);
   card._codeUi = codeUi;
+
+  ensureToolCardShell(card);
+  const shell = getToolCardShell(card);
+  shell.chrome.appendChild(header);
+  shell.scroll.append(bodyWrap, codeUi.panel, feedbackSection);
+  shell.actions.append(actions, resultEl);
+
   messagesEl.appendChild(card);
-  scrollToBottom(true);
+  focusActiveToolCard(card);
 }
 
 function renderPipInstallCard(buildCard, { pip_id, run_id, tool_name, packages, already_installed }) {
   buildCard.querySelector(".pip-install-card")?.remove();
+  buildCard.classList.add("tool-card-pip-active");
+  buildCard.classList.remove("pip-review-active");
+
+  const shell = ensureToolCardShell(buildCard);
 
   const section = document.createElement("div");
   section.className = "pip-install-card";
@@ -1445,14 +1685,10 @@ function renderPipInstallCard(buildCard, { pip_id, run_id, tool_name, packages, 
   section.appendChild(header);
   section.appendChild(body);
   section.appendChild(actions);
+  shell.attention.replaceChildren(section);
 
-  const footer = buildCard.querySelector(".tool-viewer-footer");
-  if (footer) {
-    buildCard.insertBefore(section, footer);
-  } else {
-    buildCard.appendChild(section);
-  }
-  scrollToBottom(true);
+  focusActiveToolCard(buildCard, { collapseOthers: false });
+  scrollCardRegion(buildCard, ".pip-install-actions");
 }
 
 async function consumeBuildStream(response, viewerUi, card, planId) {
@@ -1477,12 +1713,14 @@ async function consumeBuildStream(response, viewerUi, card, planId) {
           renderPipInstallCard(card, json);
           return;
         }
-        if (!handleBuildSseEvent(json, viewerUi)) return;
+        if (!handleBuildSseEvent(json, viewerUi, card)) return;
 
         if (json.ada_event === "tool_installed") {
           buildResult = { status: "success", ...json };
+          scrollCardRegion(card, ".tool-card-actions");
         } else if (json.ada_event === "tool_build_failed") {
           buildResult = { status: "failed", ...json };
+          scrollCardRegion(card, ".tool-card-actions");
         }
       } catch {
         // Ignore malformed chunks.
@@ -1520,6 +1758,8 @@ async function runPipContinuation(card, pipId, runId, approveBtn, rejectBtn) {
 
     buildResult = await consumeBuildStream(response, viewerUi, card, planId);
     card.querySelector(".pip-install-card")?.remove();
+    card.classList.remove("tool-card-pip-active");
+    card.classList.remove("pip-review-active");
 
     if (buildResult?.status === "success") {
       showViewerSuccess(card, viewerUi, buildResult.message);
@@ -1538,6 +1778,8 @@ async function runPipContinuation(card, pipId, runId, approveBtn, rejectBtn) {
       viewerUi.retryBtn.classList.remove("hidden");
       setToolPlanCardBusy(card, false);
       setStatus("Tool verification failed.", true);
+      focusActiveToolCard(card, { collapseOthers: false });
+      scrollCardRegion(card, ".tool-card-actions");
     } else if (buildResult?.status === "pip_pending") {
       setToolPlanCardBusy(card, false);
       setStatus("Additional pip packages require approval.");
@@ -1573,6 +1815,8 @@ async function handlePipRejection(card, pipId, runId, approveBtn, rejectBtn) {
       throw new Error(parseErrorMessage(await response.text()));
     }
     card.querySelector(".pip-install-card")?.remove();
+    card.classList.remove("tool-card-pip-active");
+    card.classList.remove("pip-review-active");
     const viewerUi = card._viewerUi;
     if (viewerUi) {
       updateViewerPhase(viewerUi, "pip_review", "error");
@@ -1582,6 +1826,8 @@ async function handlePipRejection(card, pipId, runId, approveBtn, rejectBtn) {
     }
     setToolPlanCardBusy(card, false);
     setStatus("Pip install rejected.");
+    focusActiveToolCard(card, { collapseOthers: false });
+    scrollCardRegion(card, ".tool-card-actions");
   } catch (error) {
     approveBtn.disabled = false;
     rejectBtn.disabled = false;
@@ -1644,6 +1890,8 @@ async function runToolBuild(card, planId, runId) {
       const isCodegen =
         /json|tool_code|parse|missing tool_code/i.test(reason) && !logs;
       setStatus(isCodegen ? "Code generation failed." : "Tool verification failed.", true);
+      focusActiveToolCard(card, { collapseOthers: false });
+      scrollCardRegion(card, ".tool-card-actions");
     }
   } catch (error) {
     if (error.name === "AbortError") {
@@ -1651,6 +1899,7 @@ async function runToolBuild(card, planId, runId) {
       showViewerOutputTab(viewerUi);
       setToolPlanCardBusy(card, false);
       viewerUi.retryBtn.classList.remove("hidden");
+      scrollCardRegion(card, ".tool-card-actions");
       return;
     }
     appendViewerLog(viewerUi, error.message, "error");
@@ -1659,6 +1908,8 @@ async function runToolBuild(card, planId, runId) {
     setToolPlanCardBusy(card, false);
     viewerUi.retryBtn.disabled = false;
     setStatus(`Approval failed: ${error.message}`, true);
+    focusActiveToolCard(card, { collapseOthers: false });
+    scrollCardRegion(card, ".tool-card-actions");
   } finally {
     runAbortControllers.delete(effectiveRunId);
     if (abortController === controller) abortController = null;

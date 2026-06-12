@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 
 from build_pipeline import (
     PENDING_PIP_INSTALLS,
+    PHASE_MAX_RETRIES,
     get_pending_pip,
     maybe_pause_for_pip_approval,
     run_sandbox_phase,
@@ -45,9 +46,10 @@ from sandbox import check_docker_available, verify_tool_in_sandbox
 from tool_creator import (
     draft_tool_edit_plan,
     draft_tool_plan,
-    fix_test_code,
+    fix_validation_errors,
     generate_tool_code_stream,
     parse_generated_tool_response,
+    repair_generated_tool_response,
     revise_tool_plan,
     validate_test_code,
 )
@@ -870,7 +872,42 @@ async def approve_tool(request: Request, payload: dict = Body(...)) -> Streaming
                     }
                 )
 
-            tool_code, test_code, requirements = parse_generated_tool_response(accumulated)
+            tool_code = ""
+            test_code = ""
+            requirements: list[str] = []
+            parse_error: Exception | None = None
+            for parse_attempt in range(PHASE_MAX_RETRIES):
+                try:
+                    if parse_attempt == 0:
+                        tool_code, test_code, requirements = parse_generated_tool_response(
+                            accumulated
+                        )
+                    break
+                except Exception as exc:
+                    parse_error = exc
+                    if parse_attempt < PHASE_MAX_RETRIES - 1:
+                        yield blog(
+                            f"Codegen JSON invalid ({exc}) — auto-repairing…",
+                            level="warn",
+                        )
+                        (
+                            tool_code,
+                            test_code,
+                            requirements,
+                        ) = await repair_generated_tool_response(
+                            plan_data["plan"],
+                            tool_name,
+                            accumulated,
+                            str(exc),
+                            creator_model,
+                            litellm_url=LITELLM_URL,
+                            headers=litellm_headers(),
+                            run_id=run_id,
+                            edit_context=edit_context,
+                        )
+                        break
+                    raise parse_error from exc
+
             log_generated_code(
                 run_id,
                 tool_name=tool_name,
@@ -918,37 +955,71 @@ async def approve_tool(request: Request, payload: dict = Body(...)) -> Streaming
         yield phase("validate_code", "active")
         yield blog("Validating module structure…")
 
-        if not validate_tool_module(tool_code):
-            reason = "Generated tool code is missing get_tool_schema() or run()."
-            log_build_event(run_id, phase="validate_code", message=reason, level="error")
-            yield step("validate_code", "Validating module structure", "error", detail=reason)
-            yield phase("validate_code", "error", detail=reason)
-            yield blog(reason, level="error")
-            yield sse_data(
-                {
-                    "ada_event": "tool_build_failed",
-                    "run_id": run_id,
-                    "tool_name": tool_name,
-                    "reason": reason,
-                }
-            )
-            yield "data: [DONE]\n\n"
-            return
+        validation_failed = False
+        validation_reason = ""
+        for val_attempt in range(PHASE_MAX_RETRIES):
+            module_ok = validate_tool_module(tool_code)
+            test_ok, test_reason = validate_test_code(test_code)
+            if module_ok and test_ok:
+                validation_failed = False
+                break
 
-        test_ok, test_reason = validate_test_code(test_code)
-        if not test_ok:
+            errors: list[str] = []
+            if not module_ok:
+                errors.append("Generated tool code is missing get_tool_schema() or run().")
+            if not test_ok:
+                errors.append(test_reason)
+            validation_reason = "; ".join(errors)
+
+            if val_attempt < PHASE_MAX_RETRIES - 1:
+                yield blog(
+                    f"Validation failed — auto-fixing ({validation_reason})…",
+                    level="warn",
+                )
+                try:
+                    tool_code, test_code = await fix_validation_errors(
+                        tool_name,
+                        tool_code,
+                        test_code,
+                        validation_reason,
+                        creator_model,
+                        litellm_url=LITELLM_URL,
+                        headers=litellm_headers(),
+                        run_id=run_id,
+                    )
+                    yield sse_data(
+                        {
+                            "ada_event": "tool_code_ready",
+                            "run_id": run_id,
+                            "tool_name": tool_name,
+                            "tool_code": tool_code,
+                            "test_code": test_code,
+                            "requirements": requirements,
+                        }
+                    )
+                    continue
+                except Exception as fix_exc:
+                    validation_reason = str(fix_exc)
+                    validation_failed = True
+                    break
+            validation_failed = True
+            break
+
+        if validation_failed:
             log_build_event(
-                run_id, phase="validate_code", message=test_reason, level="error"
+                run_id, phase="validate_code", message=validation_reason, level="error"
             )
-            yield step("validate_code", "Validating module structure", "error", detail=test_reason)
-            yield phase("validate_code", "error", detail=test_reason)
-            yield blog(test_reason, level="error")
+            yield step(
+                "validate_code", "Validating module structure", "error", detail=validation_reason
+            )
+            yield phase("validate_code", "error", detail=validation_reason)
+            yield blog(validation_reason, level="error")
             yield sse_data(
                 {
                     "ada_event": "tool_build_failed",
                     "run_id": run_id,
                     "tool_name": tool_name,
-                    "reason": test_reason,
+                    "reason": validation_reason,
                 }
             )
             yield "data: [DONE]\n\n"
@@ -967,7 +1038,8 @@ async def approve_tool(request: Request, payload: dict = Body(...)) -> Streaming
         yield phase("sandbox_test", "active")
         yield blog("Running sandbox tests in isolated container (no network)…")
 
-        sandbox_success, log_output, test_code = await run_sandbox_phase(
+        sandbox_success, log_output, test_code, tool_code, sandbox_notices = (
+            await run_sandbox_phase(
             run_id=run_id,
             tool_name=tool_name,
             tool_code=tool_code,
@@ -981,12 +1053,15 @@ async def approve_tool(request: Request, payload: dict = Body(...)) -> Streaming
             sse_data=sse_data,
             cancelled=cancelled,
         )
+        )
+        for level, message in sandbox_notices:
+            yield blog(message, level=level)
         log_sandbox(
             run_id,
             tool_name=tool_name,
             success=sandbox_success,
             logs=log_output,
-            attempt=0,
+            attempt=PHASE_MAX_RETRIES - 1 if not sandbox_success else 0,
         )
 
         if not sandbox_success:
