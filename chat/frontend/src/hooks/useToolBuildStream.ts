@@ -1,5 +1,5 @@
 import { useCallback } from 'react'
-import { rejectPip, rejectTool } from '../api/client'
+import { rejectPip, rejectPreview, rejectTool } from '../api/client'
 import { consumeBuildStream, consumeSseStream } from '../api/sse'
 import { VIEWER_PHASES } from '../constants'
 import { useAppStore } from '../state/store'
@@ -23,6 +23,28 @@ export function useToolBuildStream() {
       return true
     }
     return false
+  }, [store])
+
+  const refreshTools = useCallback(async () => {
+    try {
+      const { fetchTools, fetchConfig } = await import('../api/client')
+      const tools = await fetchTools()
+      store.setTools(tools)
+      const config = await fetchConfig()
+      store.setAppConfig(config)
+    } catch {
+      // ignore
+    }
+  }, [store])
+
+  const refreshPackages = useCallback(async () => {
+    try {
+      const { fetchPipPackages } = await import('../api/client')
+      const packages = await fetchPipPackages()
+      store.setPackages(packages)
+    } catch {
+      // ignore
+    }
   }, [store])
 
   const handleBuildSseEvent = useCallback(
@@ -86,6 +108,21 @@ export function useToolBuildStream() {
         })
         return false
       }
+      if (json.ada_event === 'ui_preview_pending') {
+        store.updateViewerPhase(cardId, 'ui_preview', 'active')
+        store.appendViewerLog(cardId, 'Interactive app preview ready — try the popup.', 'info')
+        store.setUiPreview(cardId, {
+          previewId: json.preview_id,
+          feedback: '',
+        })
+        return false
+      }
+      if (json.ada_event === 'preview_skill_app') {
+        void refreshTools().then(() => {
+          store.openSkillApp(json.skill_name)
+        })
+        return false
+      }
       if (json.ada_event === 'process_step') {
         const mapped = VIEWER_PHASES.find((p) => p.id === json.step_id)
         if (mapped && json.status !== 'skipped') {
@@ -95,30 +132,45 @@ export function useToolBuildStream() {
       }
       return true
     },
-    [store],
+    [store, refreshTools],
   )
 
-  const refreshTools = useCallback(async () => {
-    try {
-      const { fetchTools, fetchConfig } = await import('../api/client')
-      const tools = await fetchTools()
-      store.setTools(tools)
-      const config = await fetchConfig()
-      store.setAppConfig(config)
-    } catch {
-      // ignore
-    }
-  }, [store])
-
-  const refreshPackages = useCallback(async () => {
-    try {
-      const { fetchPipPackages } = await import('../api/client')
-      const packages = await fetchPipPackages()
-      store.setPackages(packages)
-    } catch {
-      // ignore
-    }
-  }, [store])
+  const processBuildResult = useCallback(
+    async (
+      cardId: string,
+      buildResult: Awaited<ReturnType<typeof consumeBuildStream>>,
+    ) => {
+      if (buildResult?.status === 'success') {
+        await refreshTools()
+        await refreshPackages()
+        store.setUiPreview(cardId, undefined)
+        store.showViewerSuccess(cardId, buildResult.message)
+        store.pushConversation({
+          role: 'assistant',
+          content: `[System] ${buildResult.message}`,
+        })
+        store.setStatus('')
+      } else if (buildResult?.status === 'preview_pending') {
+        store.updateToolPlanCard(cardId, { busy: false })
+        store.setStatus('Try the app preview, then approve or request changes.')
+      } else if (buildResult?.status === 'pip_pending') {
+        store.updateToolPlanCard(cardId, { busy: false })
+        store.setStatus('New pip packages require your approval.')
+      } else if (buildResult?.status === 'failed') {
+        const reason = buildResult.reason || 'Build failed.'
+        store.appendViewerLog(cardId, reason, 'error')
+        if (buildResult.logs) store.appendViewerLog(cardId, buildResult.logs, 'error')
+        store.updateToolPlanCard(cardId, { busy: false, showRetry: true })
+        const isCodegen =
+          /json|tool_code|parse|missing tool_code/i.test(reason) && !buildResult.logs
+        store.setStatus(
+          isCodegen ? 'Code generation failed.' : 'Skill verification failed.',
+          true,
+        )
+      }
+    },
+    [store, refreshTools, refreshPackages],
+  )
 
   const runToolBuild = useCallback(
     async (cardId: string, planId: string, runId: string) => {
@@ -158,30 +210,7 @@ export function useToolBuildStream() {
           return handleBuildSseEvent(cardId, json as AdaEvent)
         })
 
-        if (buildResult?.status === 'success') {
-          await refreshTools()
-          await refreshPackages()
-          store.showViewerSuccess(cardId, buildResult.message)
-          store.pushConversation({
-            role: 'assistant',
-            content: `[System] ${buildResult.message}`,
-          })
-          store.setStatus('')
-        } else if (buildResult?.status === 'pip_pending') {
-          store.updateToolPlanCard(cardId, { busy: false })
-          store.setStatus('New pip packages require your approval.')
-        } else if (buildResult?.status === 'failed') {
-          const reason = buildResult.reason || 'Build failed.'
-          store.appendViewerLog(cardId, reason, 'error')
-          if (buildResult.logs) store.appendViewerLog(cardId, buildResult.logs, 'error')
-          store.updateToolPlanCard(cardId, { busy: false, showRetry: true })
-          const isCodegen =
-            /json|tool_code|parse|missing tool_code/i.test(reason) && !buildResult.logs
-          store.setStatus(
-            isCodegen ? 'Code generation failed.' : 'Skill verification failed.',
-            true,
-          )
-        }
+        await processBuildResult(cardId, buildResult)
       } catch (error) {
         const err = error as Error
         if (err.name === 'AbortError') {
@@ -196,7 +225,7 @@ export function useToolBuildStream() {
         store.clearRunAbortController(effectiveRunId)
       }
     },
-    [store, handleAdaEvent, handleBuildSseEvent, refreshTools, refreshPackages],
+    [store, handleAdaEvent, handleBuildSseEvent, processBuildResult],
   )
 
   const runPipContinuation = useCallback(
@@ -249,25 +278,7 @@ export function useToolBuildStream() {
 
         store.setPipInstall(cardId, undefined)
 
-        if (buildResult?.status === 'success') {
-          await refreshTools()
-          await refreshPackages()
-          store.showViewerSuccess(cardId, buildResult.message)
-          store.pushConversation({
-            role: 'assistant',
-            content: `[System] ${buildResult.message}`,
-          })
-          store.setStatus('')
-        } else if (buildResult?.status === 'failed') {
-          const reason = buildResult.reason || 'Build failed after pip install.'
-          store.appendViewerLog(cardId, reason, 'error')
-          if (buildResult.logs) store.appendViewerLog(cardId, buildResult.logs, 'error')
-          store.updateToolPlanCard(cardId, { busy: false, showRetry: true })
-          store.setStatus('Skill verification failed.', true)
-        } else if (buildResult?.status === 'pip_pending') {
-          store.updateToolPlanCard(cardId, { busy: false })
-          store.setStatus('Additional pip packages require approval.')
-        }
+        await processBuildResult(cardId, buildResult)
       } catch (error) {
         const err = error as Error
         if (err.name === 'AbortError') {
@@ -290,7 +301,108 @@ export function useToolBuildStream() {
         store.clearRunAbortController(effectiveRunId)
       }
     },
-    [store, handleAdaEvent, handleBuildSseEvent, refreshTools, refreshPackages],
+    [store, handleAdaEvent, handleBuildSseEvent, processBuildResult],
+  )
+
+  const runPreviewContinuation = useCallback(
+    async (cardId: string, previewId: string, runId: string, url: string, body: Record<string, unknown>) => {
+      const item = useAppStore.getState().feed.find(
+        (f) => f.id === cardId && f.type === 'tool-plan',
+      )
+      if (!item || item.type !== 'tool-plan') return
+
+      const effectiveRunId = runId || item.card.runId
+      const controller = store.bindRunAbortController(effectiveRunId)
+
+      store.updateToolPlanCard(cardId, {
+        uiPreview: item.card.uiPreview
+          ? { ...item.card.uiPreview, previewId, busy: true }
+          : { previewId, busy: true },
+        busy: true,
+      })
+
+      try {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ...body,
+            preview_id: previewId,
+            run_id: effectiveRunId,
+            reasoning_effort: store.thinkingEffort,
+          }),
+          signal: controller.signal,
+        })
+
+        if (!response.ok) {
+          const { parseErrorMessage } = await import('../utils/text')
+          throw new Error(parseErrorMessage(await response.text()))
+        }
+
+        const buildResult = await consumeBuildStream(response, (json) => {
+          if (isAdaEvent(json) && handleAdaEvent(json)) return
+          return handleBuildSseEvent(cardId, json as AdaEvent)
+        })
+
+        await processBuildResult(cardId, buildResult)
+      } catch (error) {
+        const err = error as Error
+        if (err.name === 'AbortError') {
+          store.appendViewerLog(cardId, 'Preview action stopped by user.', 'warn')
+        } else {
+          store.appendViewerLog(cardId, err.message, 'error')
+          store.setStatus(`Preview action failed: ${err.message}`, true)
+        }
+        store.updateToolPlanCard(cardId, {
+          busy: false,
+          uiPreview: item.card.uiPreview
+            ? { ...item.card.uiPreview, busy: false }
+            : undefined,
+        })
+      } finally {
+        store.clearRunAbortController(effectiveRunId)
+      }
+    },
+    [store, handleAdaEvent, handleBuildSseEvent, processBuildResult],
+  )
+
+  const runPreviewApproval = useCallback(
+    async (cardId: string, previewId: string, runId: string) => {
+      store.appendViewerLog(cardId, 'Approving app preview and finishing install…')
+      await runPreviewContinuation(cardId, previewId, runId, '/api/approve_preview', {})
+    },
+    [store, runPreviewContinuation],
+  )
+
+  const runPreviewRevision = useCallback(
+    async (cardId: string, previewId: string, runId: string, feedback: string) => {
+      if (!feedback.trim()) {
+        store.setStatus('Describe the changes you want before requesting a revision.', true)
+        return
+      }
+      store.appendViewerLog(cardId, 'Revising app from your feedback…')
+      await runPreviewContinuation(cardId, previewId, runId, '/api/revise_preview', {
+        feedback,
+        tool_creator_model: store.toolCreatorModel,
+      })
+    },
+    [store, runPreviewContinuation],
+  )
+
+  const handlePreviewRejection = useCallback(
+    async (cardId: string, previewId: string, runId: string) => {
+      try {
+        await rejectPreview(previewId, runId)
+        store.setUiPreview(cardId, undefined)
+        store.updateViewerPhase(cardId, 'ui_preview', 'error')
+        store.appendViewerLog(cardId, 'App preview discarded — build cancelled.', 'error')
+        store.updateToolPlanCard(cardId, { busy: false, showRetry: true })
+        store.setStatus('App preview discarded.')
+      } catch (error) {
+        store.setStatus(`Discard failed: ${(error as Error).message}`, true)
+      }
+    },
+    [store],
   )
 
   const handlePipRejection = useCallback(
@@ -433,6 +545,9 @@ export function useToolBuildStream() {
   return {
     runToolBuild,
     runPipContinuation,
+    runPreviewApproval,
+    runPreviewRevision,
+    handlePreviewRejection,
     handlePipRejection,
     handleToolRevision,
     handleToolRejection,

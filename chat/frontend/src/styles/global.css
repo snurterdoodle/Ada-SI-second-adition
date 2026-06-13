@@ -2871,6 +2871,64 @@ button:disabled {
   border-top: 1px solid rgba(255, 193, 77, 0.2);
 }
 
+.tool-card-preview-active {
+  border-color: rgba(120, 180, 255, 0.45);
+}
+
+.ui-preview-card {
+  margin: 0;
+  padding: 1rem 1.15rem;
+  background: rgba(120, 180, 255, 0.08);
+  animation: fadeIn 0.25s ease;
+}
+
+.ui-preview-card.ui-preview-busy {
+  opacity: 0.75;
+  pointer-events: none;
+}
+
+.ui-preview-header {
+  margin-bottom: 0.75rem;
+}
+
+.ui-preview-badge {
+  display: inline-block;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 0.2rem 0.5rem;
+  border-radius: var(--radius-sm);
+  background: rgba(120, 180, 255, 0.15);
+  border: 1px solid rgba(120, 180, 255, 0.45);
+  color: #b8d4ff;
+}
+
+.ui-preview-title {
+  margin: 0.35rem 0 0;
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+.ui-preview-body {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.ui-preview-body .tool-plan-feedback {
+  margin-top: 0.75rem;
+}
+
+.ui-preview-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid rgba(120, 180, 255, 0.2);
+}
+
 .tool-plan-result.success {
   background: var(--success-soft);
   border: 1px solid rgba(62, 207, 142, 0.3);

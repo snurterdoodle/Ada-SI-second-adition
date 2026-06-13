@@ -5,6 +5,7 @@ import { Markdown } from '../chat/Markdown'
 import { ReasoningBlock } from '../chat/ReasoningBlock'
 import { ToolBuildViewer } from './ToolBuildViewer'
 import { PipApprovalCard } from './PipApprovalCard'
+import { UiPreviewCard } from './UiPreviewCard'
 import { VIEWER_PHASES } from '../../constants'
 
 type ToolPlanCardProps = {
@@ -43,6 +44,7 @@ export function ToolPlanCard({ feedId, card }: ToolPlanCardProps) {
     isBuilding ? 'tool-creation-viewer' : '',
     card.mode === 'success' ? 'tool-creation-viewer-success' : '',
     card.pipInstall ? 'tool-card-pip-active' : '',
+    card.uiPreview ? 'tool-card-preview-active' : '',
     isCollapsed ? 'tool-card-collapsed' : 'tool-card-active',
   ]
     .filter(Boolean)
@@ -129,6 +131,12 @@ export function ToolPlanCard({ feedId, card }: ToolPlanCardProps) {
       {card.pipInstall && (
         <div className="tool-card-attention">
           <PipApprovalCard feedId={feedId} card={card} pip={card.pipInstall} />
+        </div>
+      )}
+
+      {card.uiPreview && (
+        <div className="tool-card-attention">
+          <UiPreviewCard feedId={feedId} card={card} preview={card.uiPreview} />
         </div>
       )}
 

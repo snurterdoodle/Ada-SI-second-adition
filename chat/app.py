@@ -19,9 +19,13 @@ from prompts_config import (
 )
 from build_pipeline import (
     PENDING_PIP_INSTALLS,
+    PENDING_UI_PREVIEWS,
     PHASE_MAX_RETRIES,
+    continue_tool_build,
     get_pending_pip,
+    get_pending_ui_preview,
     maybe_pause_for_pip_approval,
+    maybe_pause_for_ui_preview,
     run_sandbox_phase,
     stream_runtime_install,
 )
@@ -52,6 +56,7 @@ from litellm_client import (
 )
 from runtime_client import (
     runtime_health,
+    runtime_install_tool,
     runtime_list_pip_packages,
     runtime_uninstall_pip_package,
     set_runtime_url,
@@ -64,6 +69,7 @@ from tool_creator import (
     generate_tool_code_stream,
     parse_generated_tool_response,
     repair_generated_tool_response,
+    revise_preview_code,
     revise_tool_plan_stream,
     validate_test_code,
 )
@@ -84,6 +90,7 @@ from tools_engine import (
     validate_tool_schema,
     validate_manifest,
     write_skill_data,
+    write_tool_files,
 )
 
 configure_logging()
@@ -1432,6 +1439,7 @@ async def approve_tool(request: Request, payload: dict = Body(...)) -> Streaming
             tool_name=tool_name,
             tool_code=tool_code,
             test_code=test_code,
+            manifest=manifest,
             creator_model=creator_model,
             litellm_url=LITELLM_URL,
             headers=litellm_headers(),
@@ -1478,10 +1486,7 @@ async def approve_tool(request: Request, payload: dict = Body(...)) -> Streaming
         yield phase("sandbox_test", "done")
         yield blog("Sandbox tests passed.")
 
-        yield step("install_tool", "Installing tool", "active")
-        yield phase("install_tool", "active")
-
-        paused, pause_events, new_packages = await maybe_pause_for_pip_approval(
+        preview_paused, preview_events = await maybe_pause_for_ui_preview(
             run_id=run_id,
             plan_id=plan_id,
             tool_name=tool_name,
@@ -1493,15 +1498,15 @@ async def approve_tool(request: Request, payload: dict = Body(...)) -> Streaming
             step=step,
             phase=phase,
             sse_data=sse_data,
+            blog=blog,
             reasoning_effort=reasoning_effort,
         )
-        if paused and pause_events:
-            log_pip_install(run_id, packages=new_packages, logs="awaiting user approval")
-            async for event in pause_events:
+        if preview_paused and preview_events:
+            async for event in preview_events:
                 yield event
             return
 
-        async for event in stream_runtime_install(
+        async for event in continue_tool_build(
             run_id=run_id,
             plan_id=plan_id,
             tool_name=tool_name,
@@ -1509,7 +1514,6 @@ async def approve_tool(request: Request, payload: dict = Body(...)) -> Streaming
             test_code=test_code,
             requirements=requirements,
             manifest=manifest,
-            new_packages=new_packages,
             creator_model=creator_model,
             litellm_url=LITELLM_URL,
             litellm_headers=litellm_headers(),
@@ -1518,8 +1522,8 @@ async def approve_tool(request: Request, payload: dict = Body(...)) -> Streaming
             blog=blog,
             sse_data=sse_data,
             cancelled=cancelled,
-            skip_pip=True,
             reasoning_effort=reasoning_effort,
+            preview_already_installed=False,
         ):
             yield event
 
@@ -1614,6 +1618,331 @@ async def approve_pip(request: Request, payload: dict = Body(...)) -> StreamingR
         clear_run_cancelled(run_id)
 
     return StreamingResponse(pip_stream(), media_type="text/event-stream", headers=SSE_HEADERS)
+
+
+@app.post("/api/approve_preview")
+async def approve_preview(request: Request, payload: dict = Body(...)) -> StreamingResponse:
+    preview_id = payload.get("preview_id", "").strip()
+    run_id = payload.get("run_id", "").strip()
+    if not preview_id:
+        raise HTTPException(status_code=400, detail="preview_id is required.")
+
+    try:
+        preview_data = get_pending_ui_preview(preview_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    run_id = run_id or preview_data.get("run_id", "")
+    plan_id = preview_data.get("plan_id", "")
+    tool_name = preview_data["tool_name"]
+    creator_model = preview_data.get("creator_model", "")
+
+    if not creator_model:
+        raise HTTPException(status_code=400, detail="No tool creator model configured.")
+
+    reasoning_effort = resolve_reasoning_effort(
+        payload.get("reasoning_effort") or preview_data.get("reasoning_effort"),
+        default=TOOL_CREATOR_REASONING_EFFORT,
+    )
+
+    async def preview_approve_stream():
+        clear_run_cancelled(run_id)
+
+        def step(step_id: str, label: str, status: str, *, detail: str = ""):
+            if not run_id:
+                return ""
+            return process_step(
+                run_id,
+                step_id,
+                label,
+                status,
+                model=creator_model,
+                detail=detail,
+            )
+
+        def phase(step_id: str, status: str, *, detail: str = ""):
+            if not run_id:
+                return ""
+            return tool_build_phase(run_id, step_id, status, detail=detail)
+
+        def blog(message: str, *, level: str = "info"):
+            if not run_id:
+                return ""
+            return tool_build_log(run_id, message, level=level)
+
+        async def cancelled() -> bool:
+            return is_run_cancelled(run_id) or await request.is_disconnected()
+
+        yield step("ui_preview", "Awaiting app preview approval", "done")
+
+        async for event in continue_tool_build(
+            run_id=run_id,
+            plan_id=plan_id,
+            tool_name=tool_name,
+            tool_code=preview_data["tool_code"],
+            test_code=preview_data["test_code"],
+            requirements=preview_data.get("requirements", []),
+            manifest=preview_data.get("manifest"),
+            creator_model=creator_model,
+            litellm_url=LITELLM_URL,
+            litellm_headers=litellm_headers(),
+            step=step,
+            phase=phase,
+            blog=blog,
+            sse_data=sse_data,
+            cancelled=cancelled,
+            reasoning_effort=reasoning_effort,
+            preview_already_installed=bool(preview_data.get("preview_installed")),
+        ):
+            yield event
+
+        PENDING_UI_PREVIEWS.pop(preview_id, None)
+        if plan_id in PENDING_PLANS:
+            del PENDING_PLANS[plan_id]
+        clear_run_cancelled(run_id)
+
+    return StreamingResponse(
+        preview_approve_stream(), media_type="text/event-stream", headers=SSE_HEADERS
+    )
+
+
+@app.post("/api/revise_preview")
+async def revise_preview(request: Request, payload: dict = Body(...)) -> StreamingResponse:
+    preview_id = payload.get("preview_id", "").strip()
+    feedback = payload.get("feedback", "").strip()
+    run_id = payload.get("run_id", "").strip()
+    if not preview_id:
+        raise HTTPException(status_code=400, detail="preview_id is required.")
+    if not feedback:
+        raise HTTPException(
+            status_code=400,
+            detail="Describe the changes you want before requesting a revision.",
+        )
+
+    try:
+        preview_data = get_pending_ui_preview(preview_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    run_id = run_id or preview_data.get("run_id", "")
+    plan_id = preview_data.get("plan_id", "")
+    tool_name = preview_data["tool_name"]
+    creator_model = preview_data.get("creator_model", "")
+
+    if not creator_model:
+        raise HTTPException(status_code=400, detail="No tool creator model configured.")
+
+    reasoning_effort = resolve_reasoning_effort(
+        payload.get("reasoning_effort") or preview_data.get("reasoning_effort"),
+        default=TOOL_CREATOR_REASONING_EFFORT,
+    )
+
+    async def preview_revise_stream():
+        clear_run_cancelled(run_id)
+
+        def step(step_id: str, label: str, status: str, *, detail: str = ""):
+            if not run_id:
+                return ""
+            return process_step(
+                run_id,
+                step_id,
+                label,
+                status,
+                model=creator_model,
+                detail=detail,
+            )
+
+        def phase(step_id: str, status: str, *, detail: str = ""):
+            if not run_id:
+                return ""
+            return tool_build_phase(run_id, step_id, status, detail=detail)
+
+        def blog(message: str, *, level: str = "info"):
+            if not run_id:
+                return ""
+            return tool_build_log(run_id, message, level=level)
+
+        async def cancelled() -> bool:
+            return is_run_cancelled(run_id) or await request.is_disconnected()
+
+        yield step("ui_preview", "Revising app from your feedback", "active")
+        yield phase("ui_preview", "active")
+        yield blog("Revising skill from your app preview feedback…")
+
+        try:
+            tool_code, test_code, manifest = await revise_preview_code(
+                tool_name,
+                preview_data["tool_code"],
+                preview_data["test_code"],
+                preview_data.get("manifest"),
+                feedback,
+                creator_model,
+                litellm_url=LITELLM_URL,
+                headers=litellm_headers(),
+                run_id=run_id,
+                reasoning_effort=reasoning_effort,
+            )
+        except Exception as exc:
+            yield step("ui_preview", "Revising app from your feedback", "error", detail=str(exc))
+            yield phase("ui_preview", "error", detail=str(exc)[:200])
+            yield sse_data(
+                {
+                    "ada_event": "tool_build_failed",
+                    "run_id": run_id,
+                    "tool_name": tool_name,
+                    "reason": f"Preview revision failed: {exc}",
+                }
+            )
+            yield "data: [DONE]\n\n"
+            return
+
+        yield sse_data(
+            {
+                "ada_event": "tool_code_ready",
+                "run_id": run_id,
+                "tool_name": tool_name,
+                "tool_code": tool_code,
+                "test_code": test_code,
+                "requirements": preview_data.get("requirements", []),
+            }
+        )
+
+        sandbox_success, log_output, test_code, tool_code, sandbox_notices = (
+            await run_sandbox_phase(
+                run_id=run_id,
+                tool_name=tool_name,
+                tool_code=tool_code,
+                test_code=test_code,
+                manifest=manifest,
+                creator_model=creator_model,
+                litellm_url=LITELLM_URL,
+                headers=litellm_headers(),
+                step=step,
+                phase=phase,
+                blog=blog,
+                sse_data=sse_data,
+                cancelled=cancelled,
+                reasoning_effort=reasoning_effort,
+            )
+        )
+        for level, message in sandbox_notices:
+            yield blog(message, level=level)
+        log_sandbox(
+            run_id,
+            tool_name=tool_name,
+            success=sandbox_success,
+            logs=log_output,
+            attempt=PHASE_MAX_RETRIES - 1 if not sandbox_success else 0,
+        )
+
+        if not sandbox_success:
+            yield step("sandbox_test", "Running sandbox tests", "error", detail=log_output[:500])
+            yield phase("sandbox_test", "error", detail=log_output[:200])
+            yield blog(log_output, level="error")
+            yield sse_data(
+                {
+                    "ada_event": "tool_build_failed",
+                    "run_id": run_id,
+                    "tool_name": tool_name,
+                    "reason": "Sandbox verification failed after preview revision.",
+                    "logs": log_output,
+                }
+            )
+            yield "data: [DONE]\n\n"
+            return
+
+        preview_data["tool_code"] = tool_code
+        preview_data["test_code"] = test_code
+        preview_data["manifest"] = manifest
+
+        yield blog(f"Re-installing preview of '{tool_name}'…")
+        try:
+            await runtime_install_tool(
+                tool_name,
+                tool_code,
+                test_code,
+                preview_data.get("requirements", []),
+                skip_pip=True,
+            )
+            write_tool_files(
+                tool_name,
+                tool_code,
+                preview_data.get("requirements", []),
+                test_code,
+                manifest=manifest,
+            )
+            preview_data["preview_installed"] = True
+        except Exception as exc:
+            yield step("ui_preview", "Revising app from your feedback", "error", detail=str(exc))
+            yield phase("ui_preview", "error", detail=str(exc)[:200])
+            yield sse_data(
+                {
+                    "ada_event": "tool_build_failed",
+                    "run_id": run_id,
+                    "tool_name": tool_name,
+                    "reason": f"Preview re-install failed: {exc}",
+                }
+            )
+            yield "data: [DONE]\n\n"
+            return
+
+        new_preview_id = uuid.uuid4().hex
+        PENDING_UI_PREVIEWS[new_preview_id] = {
+            **preview_data,
+            "preview_id": new_preview_id,
+            "created_at": time.time(),
+        }
+        PENDING_UI_PREVIEWS.pop(preview_id, None)
+
+        yield step("ui_preview", "Revising app from your feedback", "done")
+        yield phase("ui_preview", "active")
+        yield sse_data(
+            {
+                "ada_event": "ui_preview_pending",
+                "preview_id": new_preview_id,
+                "run_id": run_id,
+                "plan_id": plan_id,
+                "tool_name": tool_name,
+            }
+        )
+        yield sse_data(
+            {
+                "ada_event": "preview_skill_app",
+                "run_id": run_id,
+                "skill_name": tool_name,
+            }
+        )
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        preview_revise_stream(), media_type="text/event-stream", headers=SSE_HEADERS
+    )
+
+
+@app.post("/api/reject_preview")
+async def reject_preview(payload: dict = Body(...)) -> dict:
+    preview_id = payload.get("preview_id", "").strip()
+    if not preview_id:
+        raise HTTPException(status_code=400, detail="preview_id is required.")
+
+    preview_data = PENDING_UI_PREVIEWS.pop(preview_id, None)
+    if preview_data is None:
+        raise HTTPException(status_code=404, detail="UI preview request not found.")
+
+    tool_name = preview_data.get("tool_name", "")
+    if preview_data.get("preview_installed") and tool_name:
+        try:
+            await delete_tool_async(tool_name)
+        except Exception as exc:
+            logger.warning("Failed to remove preview tool %s: %s", tool_name, exc)
+
+    log_build_event(
+        preview_data.get("run_id", ""),
+        phase="ui_preview",
+        message=f"preview rejected for {tool_name}",
+        level="warn",
+    )
+    return {"status": "rejected", "preview_id": preview_id, "tool_name": tool_name}
 
 
 @app.post("/api/reject_pip")

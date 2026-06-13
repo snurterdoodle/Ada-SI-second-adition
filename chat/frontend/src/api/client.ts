@@ -108,3 +108,11 @@ export async function rejectPip(pipId: string, runId: string): Promise<void> {
     body: JSON.stringify({ pip_id: pipId, run_id: runId }),
   })
 }
+
+export async function rejectPreview(previewId: string, runId: string): Promise<void> {
+  await requestJson('/api/reject_preview', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ preview_id: previewId, run_id: runId }),
+  })
+}

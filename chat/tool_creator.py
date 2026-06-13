@@ -17,8 +17,9 @@ from prompts_config import (
     get_forge_fix_validation_prompt,
     get_forge_plan_prompt,
     get_forge_revise_plan_prompt,
+    get_forge_revise_preview_prompt,
 )
-from tools_engine import validate_tool_module
+from tools_engine import validate_manifest, validate_tool_module
 
 
 async def _litellm_chat(
@@ -352,7 +353,7 @@ async def repair_generated_tool_response(
         test_code=test_code,
         source="repair_codegen",
     )
-    return tool_code, test_code, requirements, _manifest
+    return tool_code, test_code, requirements
 
 
 async def fix_validation_errors(
@@ -402,6 +403,67 @@ async def fix_validation_errors(
         source="fix_validation",
     )
     return fixed_tool, fixed_test
+
+
+async def revise_preview_code(
+    tool_name: str,
+    tool_code: str,
+    test_code: str,
+    manifest: dict | None,
+    feedback: str,
+    creator_model: str,
+    *,
+    litellm_url: str,
+    headers: dict[str, str],
+    run_id: str = "",
+    reasoning_effort: str | None = None,
+) -> tuple[str, str, dict | None]:
+    log_debug(run_id, "CODE_FIX", f"revising preview from UI feedback model={creator_model}")
+    manifest_json = json.dumps(manifest, indent=2) if manifest else "null"
+    user_content = (
+        f"Tool name: `{tool_name}`\n\n"
+        f"User UI feedback:\n{feedback}\n\n"
+        f"Current manifest:\n```json\n{manifest_json}\n```\n\n"
+        f"Current tool_code:\n```python\n{tool_code}\n```\n\n"
+        f"Current test_code:\n```python\n{test_code}\n```\n\n"
+        f"Return revised tool_code, test_code, and manifest."
+    )
+    messages = [
+        {
+            "role": "system",
+            "content": get_forge_revise_preview_prompt().replace("{tool_name}", tool_name),
+        },
+        {"role": "user", "content": user_content},
+    ]
+    raw = await _litellm_chat(
+        litellm_url, headers, creator_model, messages, temperature=0.1,
+        reasoning_effort=reasoning_effort,
+    )
+    parsed = _extract_json_object(raw)
+    fixed_tool = str(parsed.get("tool_code", "")).strip() or tool_code
+    fixed_test = str(parsed.get("test_code", "")).strip() or test_code
+    fixed_manifest = parsed.get("manifest")
+    if fixed_manifest is None:
+        fixed_manifest = manifest
+    elif not isinstance(fixed_manifest, dict):
+        fixed_manifest = manifest
+    if not validate_tool_module(fixed_tool):
+        raise ValueError("Revised tool_code still missing get_tool_schema() or run().")
+    ok, reason = validate_test_code(fixed_test)
+    if not ok:
+        raise ValueError(f"Revised test_code still invalid: {reason}")
+    if fixed_manifest:
+        manifest_ok, manifest_reason = validate_manifest(fixed_manifest, tool_name)
+        if not manifest_ok:
+            raise ValueError(f"Revised manifest invalid: {manifest_reason}")
+    log_generated_code(
+        run_id,
+        tool_name=tool_name,
+        tool_code=fixed_tool,
+        test_code=fixed_test,
+        source="revise_preview",
+    )
+    return fixed_tool, fixed_test, fixed_manifest
 
 
 async def fix_runtime_failure(

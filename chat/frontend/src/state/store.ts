@@ -166,6 +166,7 @@ type AppState = {
   expandToolPlan: (id: string) => void
   collapseOtherToolPlans: (exceptId: string) => void
   setPipInstall: (id: string, pip: ToolPlanCardState['pipInstall']) => void
+  setUiPreview: (id: string, preview: ToolPlanCardState['uiPreview']) => void
   appendViewerLog: (id: string, message: string, level?: 'info' | 'warn' | 'error') => void
   updateViewerPhase: (id: string, phaseId: string, status: PhaseStatus) => void
   showViewerSuccess: (id: string, message: string) => void
@@ -642,6 +643,10 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setPipInstall: (id, pip) => {
     get().updateToolPlanCard(id, { pipInstall: pip })
+  },
+
+  setUiPreview: (id, preview) => {
+    get().updateToolPlanCard(id, { uiPreview: preview })
   },
 
   appendViewerLog: (id, message, level = 'info') => {

@@ -12,7 +12,7 @@ _DEFAULT_SCOUT_ORCHESTRATOR_PREFIX = """You are Ada-SI, a self-improving agent t
 
 Routing rules (follow strictly):
 1. If the user needs live or external data you cannot access directly — weather, stock prices, news, web lookups, account/system state, file I/O, scheduled jobs, or any API — call generate_new_tool. Do NOT reply with "I can't" or ask clarifying questions instead of calling the tool; put requirements (APIs, inputs, outputs) in the tool description.
-2. If the user wants a persistent app-like capability (calendar, todos, calculator, tracker) that they can also open as a popup mini-app, call generate_new_tool and describe it as an INTERACTIVE skill. Specify the UI template: calendar for scheduling, list for todos/notes, table for calculators/history/trackers. Tell Forge NOT to use rich or terminal UI — the React app renders the popup.
+2. If the user wants a persistent app-like capability (calendar, todos, notes, tracker, journal) that they can also open as a popup mini-app, call generate_new_tool and describe it as an INTERACTIVE skill with the desired UI (calendar, list, or table template).
 3. If an installed tool matches the request, call that tool first. Pass whatever arguments you have; the tool may return follow-up questions.
 4. If the user asks to see, view, open, or show an installed interactive skill app, call open_skill_app with the skill name.
 5. If the user asks to fix, change, or improve an existing installed tool, call edit_existing_tool with the tool name and a detailed description of the changes.
@@ -31,13 +31,7 @@ _DEFAULT_SCOUT_ADDITIONAL_DIRECTIVES = ""
 _DEFAULT_FORGE_RUNTIME_CONTEXT = """Runtime context (always true):
 - Forged Python tools execute in a headless Docker container (python:3.12-slim tool-runtime).
 - Tools cannot access local user hardware, desktop UI, or physical devices.
-- Do not use libraries that require microphones, speakers, cameras, or other local hardware.
-
-Interactive skill architecture (critical):
-- The popup mini-app UI is rendered by the Ada-SI React frontend using built-in templates: calendar, list, or table.
-- Python tools MUST NOT render terminal/GUI UI (no rich, textual, curses, blessed, prompt_toolkit, tkinter, pygame).
-- Interactive tools ONLY persist JSON to Path(__file__).parent / "skill_data" / "{tool_name}.json" and return json.dumps(...) from run().
-- Never return formatted terminal screens, ASCII art, or HTML from run()."""
+- Do not use libraries that require microphones, speakers, cameras, or other local hardware."""
 
 # --- Forge phase prompt defaults ---
 
@@ -45,22 +39,12 @@ _DEFAULT_FORGE_PLAN_PROMPT = """You are an expert Python tool architect for a se
 
 The user needs a new callable tool. Produce a clear implementation plan in markdown with these sections:
 ## Skill Kind and UI
-Decide headless vs interactive.
-For interactive skills, pick EXACTLY ONE built-in UI template:
-- calendar — scheduling, events, appointments
-- list — todos, notes, checklists
-- table — calculators with history, trackers, journals, any tabular CRUD
-There is NO custom/grid/calculator template. A calculator app MUST use template "table" (history rows) plus optional state fields in the JSON store.
-The React frontend renders the popup — do NOT plan rich/terminal/Python UI rendering.
-Define the record schema (fields, types) and operations (list, create, delete, etc.).
+Decide headless vs interactive. For interactive skills (calendar, todos, notes, trackers), pick a UI template: calendar, list, or table. Define the record schema (fields, types) and operations (list, create, delete, etc.).
 ## Architecture Changes
 ## Function Schema
-Use a single tool with an `action` enum parameter for interactive skills (e.g. press_key, get_state, list_records).
-get_tool_schema() MUST use OpenAI format: {"type": "function", "function": {"name": "...", "description": "...", "parameters": {...}}}.
+Use a single tool with an `action` enum parameter for interactive skills (e.g. list_events, create_event, delete_event).
 ## Execution Steps
-Interactive skills persist data to Path(__file__).parent / "skill_data" / "{tool_name}.json".
-Store shape example: {"state": {...}, "records": [{"id": "...", ...fields...}]}. run() returns json.dumps(...), never terminal UI.
-Use stdlib only unless external APIs truly require a package.
+Interactive skills persist data to Path(__file__).parent / "skill_data" / "{tool_name}.json" as {"records": [...]}.
 ## Risks and Limitations
 
 Be specific about inputs, outputs, and edge cases. Do not write full Python code yet."""
@@ -112,58 +96,24 @@ For INTERACTIVE skills, set manifest to:
   },
   "operations": ["list_events", "create_event", "delete_event"]
 }
-UI templates: calendar (scheduling), list (todos/notes), table (generic CRUD, calculator history, trackers).
+UI templates: calendar (scheduling), list (todos/notes), table (generic CRUD).
 For headless-only tools, set "manifest": null or {"kind": "headless"}.
 
-Interactive tool rules (MUST follow):
+Interactive tool rules:
 - Persist data to Path(__file__).parent / "skill_data" / "{tool_name}.json"
-- Store shape: {"state": {...optional...}, "records": [{"id": "...", ...fields...}]}
+- Store shape: {"records": [{"id": "...", ...fields...}]}
 - Use run(action=...) with action enum matching manifest.operations
-- run() MUST return json.dumps(dict) — structured JSON text, NOT terminal UI strings
-- NEVER import rich, textual, curses, blessed, prompt_toolkit, tkinter, or pygame
-- NEVER render calculator screens, panels, tables, or ASCII UI in Python — the React template handles all visual UI
 - Create skill_data directory if missing
-- requirements MUST be [] for stdlib-only interactive tools (do not add rich)
-
-get_tool_schema() MUST return this exact OpenAI shape:
-{
-  "type": "function",
-  "function": {
-    "name": "{tool_name}",
-    "description": "...",
-    "parameters": {
-      "type": "object",
-      "properties": { "action": {"type": "string", "enum": [...]}, ... },
-      "required": ["action"]
-    }
-  }
-}
-Do NOT use a flat schema with top-level "name"/"parameters" only.
-
-Example interactive calculator manifest (table template):
-{
-  "kind": "interactive",
-  "display_name": "Calculator",
-  "icon": "table",
-  "ui": {
-    "template": "table",
-    "title_field": "expression",
-    "fields": [
-      {"key": "expression", "label": "Expression", "type": "string"},
-      {"key": "result", "label": "Result", "type": "string"},
-      {"key": "timestamp", "label": "Time", "type": "string"}
-    ]
-  },
-  "operations": ["get_state", "press_key", "clear_history", "delete_history_item"]
-}
 
 Rules:
 - requirements: list every PyPI package the tool needs at runtime (e.g. httpx). Use [] for stdlib-only tools.
 - Do NOT include pip, setuptools, or wheel in requirements.
 - tool_name must match the module filename stem
 - test_code runs inside python:3.12-slim with the tool mounted at /workspace/{tool_name}.py
+- Sandbox layout: tool code at /workspace/{tool_name}.py is read-only; /workspace/skill_data/ is writable and pre-seeded with {{"records": []}} for interactive skills
+- Interactive skill tests: call real run() CRUD actions — no filesystem mocks needed for skill_data persistence
 - test_run.py must exit 0 on success
-- No network, filesystem outside /workspace, or subprocess calls in generated tools during tests
+- No network, subprocess calls, or writes outside /workspace during tests (skill_data writes inside /workspace are allowed)
 - Keep tools minimal and focused
 - In tool_code Python source use Python literals True, False, and None — never JSON true, false, or null
 - JSON string values MUST be valid JSON: escape every double quote inside code as \\", newlines as \\n, backslashes as \\\\
@@ -180,8 +130,15 @@ def load_tool():
     spec.loader.exec_module(mod)
     return mod
 
-# Use unittest.mock.patch on network/filesystem/subprocess before calling mod.run().
-# Sandbox has NO network access — never call mod.run() against real URLs without mocks."""
+# Use unittest.mock.patch on network/subprocess before calling mod.run().
+# Interactive skills: test real persistence under /workspace/skill_data/ (writable, pre-seeded).
+# Headless skills: mock network/subprocess. Sandbox has NO network access.
+
+# Interactive skill test template:
+# mod = load_tool()
+# mod.run(action="create_...", ...)
+# state = mod.run(action="list_...")
+# assert records created/deleted as expected"""
 
 _DEFAULT_FORGE_EDIT_CODE_PROMPT = """You are an expert Python developer updating an existing tool for a self-improving AI agent.
 
@@ -203,24 +160,45 @@ Rules:
 - Preserve tool_name as the module filename stem
 - In tool_code Python source use Python literals True, False, and None — never JSON true, false, or null
 - requirements: full list of PyPI packages needed after your edit (not just new ones)
-- test_code runs in sandbox at /workspace/{tool_name}.py with mocks for network/filesystem
+- test_code runs in sandbox at /workspace/{tool_name}.py; /workspace/skill_data/ is writable for interactive skills
+- Mock network/subprocess in test_code for headless tools; interactive skills test real skill_data CRUD
 - ALL file paths in run() return values MUST use /workspace/ prefix
 - JSON string values MUST be valid JSON with escaped quotes and newlines"""
 
 _DEFAULT_FORGE_FIX_TEST_PROMPT = """You are an expert Python test engineer fixing sandbox test failures.
 
 The tool module (tool_code) is correct — only fix test_code so it passes in an isolated
-python:3.12-slim container with NO network, NO filesystem outside /workspace, and the tool
-mounted at /workspace/{tool_name}.py.
+python:3.12-slim container with NO network, the tool mounted read-only at /workspace/{tool_name}.py,
+and /workspace/skill_data/ writable with pre-seeded {{"records": []}} for interactive skills.
 
 Respond with ONLY valid JSON (no markdown fences):
 {{ "test_code": "<fixed test_run.py source>" }}
 
 Rules:
 - Use importlib.util.spec_from_file_location to load the tool from /workspace/{tool_name}.py
-- Mock ALL network, filesystem, and subprocess calls with unittest.mock.patch
+- Mock network and subprocess calls with unittest.mock.patch
+- Interactive skills: do NOT mock skill_data persistence — test real run() CRUD against /workspace/skill_data/
+- Headless skills: mock external I/O as needed
 - Assert paths using /workspace/ prefix when checking run() return values
 - test_run.py must exit 0 when run as: python /workspace/test_run.py"""
+
+_DEFAULT_FORGE_REVISE_PREVIEW_PROMPT = """You revise an interactive skill preview based on user UI feedback.
+
+The user tested the popup mini-app (calendar, list, or table template) and requested changes.
+Fix tool_code, test_code, and manifest so the UI and run(action=...) behavior match.
+
+Respond with ONLY valid JSON (no markdown fences):
+{{ "tool_code": "...", "test_code": "...", "manifest": {{ ... }} }}
+
+Rules:
+- Preserve tool_name as the module filename stem
+- manifest.kind must remain "interactive"
+- Align manifest.ui.fields, title_field, date_field, done_field with record shape in tool_code
+- manifest.operations must match run(action=...) enum values
+- Persist to Path(__file__).parent / "skill_data" / "{tool_name}.json"
+- test_code loads from /workspace/{tool_name}.py; interactive tests use real /workspace/skill_data/ CRUD
+- In tool_code use Python True, False, None — never JSON true/false/null
+- ALL file paths in run() return values use /workspace/ prefix"""
 
 _DEFAULT_FORGE_FIX_CODEGEN_PROMPT = """You repair malformed tool-creator JSON responses.
 
@@ -242,12 +220,9 @@ Return ONLY valid JSON (no markdown fences):
 
 Rules:
 - tool_code MUST define get_tool_schema() and run()
-- get_tool_schema() MUST return OpenAI format: {{"type": "function", "function": {{"name": "...", "description": "...", "parameters": {{...}}}}}}
-- NEVER import rich, textual, curses, blessed, prompt_toolkit, tkinter, or pygame — remove all terminal UI code
-- For interactive skills: run() returns json.dumps(...) with state/records data; delete render_ui/console/panel/table UI helpers
-- test_code MUST assert JSON return values and persisted data — NOT rich terminal strings like "Calculator Screen"
+- get_tool_schema() must use Python True, False, and None — never JSON true, false, or null
 - test_code MUST load via importlib from /workspace/{tool_name}.py and include tests/mocks
-- Use stdlib only; set requirements to [] in the original response (do not add rich)
+- ALL file paths in run() return values use /workspace/ prefix
 - Fix only what validation requires; keep behavior from the plan"""
 
 _DEFAULT_FORGE_FIX_RUNTIME_PROMPT = """You fix tool_code and/or test_code failures in the persistent tool runtime.
@@ -294,6 +269,7 @@ PROMPT_KEYS = (
     "forge_fix_codegen_prompt",
     "forge_fix_validation_prompt",
     "forge_fix_runtime_prompt",
+    "forge_revise_preview_prompt",
     "tool_generate_new_description",
     "tool_edit_existing_description",
 )
@@ -317,6 +293,7 @@ class PromptsConfig(TypedDict):
     forge_fix_codegen_prompt: str
     forge_fix_validation_prompt: str
     forge_fix_runtime_prompt: str
+    forge_revise_preview_prompt: str
     tool_generate_new_description: str
     tool_edit_existing_description: str
 
@@ -356,6 +333,7 @@ def default_prompts_config() -> PromptsConfig:
         "forge_fix_codegen_prompt": _DEFAULT_FORGE_FIX_CODEGEN_PROMPT,
         "forge_fix_validation_prompt": _DEFAULT_FORGE_FIX_VALIDATION_PROMPT,
         "forge_fix_runtime_prompt": _DEFAULT_FORGE_FIX_RUNTIME_PROMPT,
+        "forge_revise_preview_prompt": _DEFAULT_FORGE_REVISE_PREVIEW_PROMPT,
         "tool_generate_new_description": _DEFAULT_TOOL_GENERATE_NEW_DESCRIPTION,
         "tool_edit_existing_description": _DEFAULT_TOOL_EDIT_EXISTING_DESCRIPTION,
     }
@@ -486,6 +464,10 @@ def get_forge_fix_validation_prompt() -> str:
 
 def get_forge_fix_runtime_prompt() -> str:
     return load_prompts_config()["forge_fix_runtime_prompt"]
+
+
+def get_forge_revise_preview_prompt() -> str:
+    return _with_forge_appendix(load_prompts_config()["forge_revise_preview_prompt"])
 
 
 def get_tool_generate_new_description() -> str:

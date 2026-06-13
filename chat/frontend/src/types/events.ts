@@ -121,6 +121,12 @@ export type PipInstallState = {
   busy?: boolean
 }
 
+export type UiPreviewState = {
+  previewId: string
+  busy?: boolean
+  feedback?: string
+}
+
 export type ToolPlanMode =
   | 'draft'
   | 'pending'
@@ -152,6 +158,7 @@ export type ToolPlanCardState = {
   showCodeTabs: boolean
   showCodeStream: boolean
   pipInstall?: PipInstallState
+  uiPreview?: UiPreviewState
   collapsedSummary?: string
   collapsedStatus?: string
   collapsedStatusClass?: string
@@ -197,6 +204,8 @@ export type AdaEventType =
   | 'tool_build_phase'
   | 'tool_build_log'
   | 'pip_install_pending'
+  | 'ui_preview_pending'
+  | 'preview_skill_app'
   | 'tool_installed'
   | 'tool_build_failed'
   | 'open_skill_app'
@@ -270,6 +279,14 @@ export type AdaEvent =
       packages?: string[]
       already_installed?: string[]
     }
+  | {
+      ada_event: 'ui_preview_pending'
+      preview_id: string
+      run_id: string
+      plan_id?: string
+      tool_name?: string
+    }
+  | { ada_event: 'preview_skill_app'; run_id: string; skill_name: string }
   | { ada_event: 'tool_installed'; message: string }
   | {
       ada_event: 'tool_build_failed'
@@ -320,6 +337,7 @@ export function createDefaultViewerPhases(): Record<string, PhaseStatus> {
     generate_code: 'pending',
     validate_code: 'pending',
     sandbox_test: 'pending',
+    ui_preview: 'pending',
     pip_review: 'pending',
     runtime_verify: 'pending',
     install_tool: 'pending',

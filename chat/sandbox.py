@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import shutil
@@ -5,6 +6,8 @@ from pathlib import Path
 
 import docker
 from docker.errors import DockerException
+
+from tools_engine import DEFAULT_SKILL_DATA
 
 logger = logging.getLogger(__name__)
 
@@ -65,8 +68,33 @@ def _format_sandbox_logs(stdout: str, stderr: str, exit_code: int | None = None)
     return combined
 
 
+def _seed_skill_data(staging_dir: Path, tool_name: str) -> Path:
+    skill_data_dir = staging_dir / "skill_data"
+    skill_data_dir.mkdir(parents=True, exist_ok=True)
+    data_path = skill_data_dir / f"{tool_name}.json"
+    data_path.write_text(
+        json.dumps(dict(DEFAULT_SKILL_DATA), indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return skill_data_dir
+
+
+def _sandbox_volumes(host_workspace: str, skill_data_host: str | None) -> dict:
+    """Mount /workspace read-only; bind skill_data read-write when present."""
+    volumes: dict = {
+        host_workspace: {"bind": "/workspace", "mode": "ro"},
+    }
+    if skill_data_host:
+        volumes[skill_data_host] = {"bind": "/workspace/skill_data", "mode": "rw"}
+    return volumes
+
+
 def verify_tool_in_sandbox(
-    tool_name: str, tool_code: str, test_code: str
+    tool_name: str,
+    tool_code: str,
+    test_code: str,
+    *,
+    manifest: dict | None = None,
 ) -> tuple[bool, str]:
     available, reason = check_docker_available()
     if not available:
@@ -87,15 +115,18 @@ def verify_tool_in_sandbox(
     (staging_dir / f"{tool_name}.py").write_text(tool_code, encoding="utf-8")
     (staging_dir / "test_run.py").write_text(test_code, encoding="utf-8")
 
+    skill_data_host: str | None = None
+    if manifest and manifest.get("kind") == "interactive":
+        _seed_skill_data(staging_dir, tool_name)
+        skill_data_host = str(Path(staging_host) / tool_name / "skill_data")
+
     host_workspace = str(Path(staging_host) / tool_name)
     container = None
     try:
         container = client.containers.run(
             image=SANDBOX_IMAGE,
             command="python /workspace/test_run.py",
-            volumes={
-                host_workspace: {"bind": "/workspace", "mode": "ro"},
-            },
+            volumes=_sandbox_volumes(host_workspace, skill_data_host),
             detach=True,
             network_disabled=True,
             mem_limit=SANDBOX_MEM_LIMIT,

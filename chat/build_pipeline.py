@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -17,7 +18,10 @@ from tool_creator import (
 )
 from tools_engine import get_new_packages_for_requirements, validate_tool_module, write_tool_files
 
+logger = logging.getLogger(__name__)
+
 PENDING_PIP_INSTALLS: dict[str, dict] = {}
+PENDING_UI_PREVIEWS: dict[str, dict] = {}
 PIP_TTL_SECONDS = 3600
 PHASE_MAX_RETRIES = 2
 
@@ -33,11 +37,30 @@ def cleanup_expired_pip_installs() -> None:
         del PENDING_PIP_INSTALLS[pip_id]
 
 
+def cleanup_expired_ui_previews() -> None:
+    now = time.time()
+    expired = [
+        preview_id
+        for preview_id, data in PENDING_UI_PREVIEWS.items()
+        if now - data.get("created_at", now) > PIP_TTL_SECONDS
+    ]
+    for preview_id in expired:
+        del PENDING_UI_PREVIEWS[preview_id]
+
+
 def get_pending_pip(pip_id: str) -> dict:
     cleanup_expired_pip_installs()
     data = PENDING_PIP_INSTALLS.get(pip_id)
     if data is None:
         raise ValueError("Pip install request not found or expired.")
+    return data
+
+
+def get_pending_ui_preview(preview_id: str) -> dict:
+    cleanup_expired_ui_previews()
+    data = PENDING_UI_PREVIEWS.get(preview_id)
+    if data is None:
+        raise ValueError("UI preview request not found or expired.")
     return data
 
 
@@ -287,12 +310,198 @@ async def maybe_pause_for_pip_approval(
     return True, _pause_events(), new_packages
 
 
+async def maybe_pause_for_ui_preview(
+    *,
+    run_id: str,
+    plan_id: str,
+    tool_name: str,
+    tool_code: str,
+    test_code: str,
+    requirements: list[str],
+    manifest: dict | None,
+    creator_model: str,
+    step: Callable[..., str],
+    phase: Callable[..., str],
+    sse_data: Callable[[dict], str],
+    blog: Callable[..., str],
+    reasoning_effort: str | None = None,
+) -> tuple[bool, AsyncIterator[str] | None]:
+    """Return (paused, pause_event_stream) for interactive skills after sandbox pass."""
+    if not manifest or manifest.get("kind") != "interactive":
+        return False, None
+
+    preview_id = uuid.uuid4().hex
+    PENDING_UI_PREVIEWS[preview_id] = {
+        "preview_id": preview_id,
+        "run_id": run_id,
+        "plan_id": plan_id,
+        "tool_name": tool_name,
+        "tool_code": tool_code,
+        "test_code": test_code,
+        "requirements": requirements,
+        "manifest": manifest,
+        "creator_model": creator_model,
+        "reasoning_effort": reasoning_effort,
+        "preview_installed": False,
+        "created_at": time.time(),
+    }
+
+    async def _pause_events() -> AsyncIterator[str]:
+        preview_data = PENDING_UI_PREVIEWS[preview_id]
+        yield step(
+            "ui_preview",
+            "Awaiting app preview approval",
+            "active",
+            detail=tool_name,
+        )
+        yield phase("ui_preview", "active")
+        yield blog(f"Installing preview of interactive skill '{tool_name}'…")
+        try:
+            await runtime_install_tool(
+                tool_name,
+                tool_code,
+                test_code,
+                requirements,
+                skip_pip=True,
+            )
+            write_tool_files(
+                tool_name, tool_code, requirements, test_code, manifest=manifest
+            )
+            preview_data["preview_installed"] = True
+            yield blog("Preview installed — open the app and try it before approving.")
+        except Exception as exc:
+            del PENDING_UI_PREVIEWS[preview_id]
+            yield step(
+                "ui_preview",
+                "Awaiting app preview approval",
+                "error",
+                detail=str(exc)[:200],
+            )
+            yield phase("ui_preview", "error", detail=str(exc)[:200])
+            yield sse_data(
+                {
+                    "ada_event": "tool_build_failed",
+                    "run_id": run_id,
+                    "tool_name": tool_name,
+                    "reason": f"Preview install failed: {exc}",
+                }
+            )
+            yield "data: [DONE]\n\n"
+            return
+
+        yield sse_data(
+            {
+                "ada_event": "ui_preview_pending",
+                "preview_id": preview_id,
+                "run_id": run_id,
+                "plan_id": plan_id,
+                "tool_name": tool_name,
+            }
+        )
+        yield sse_data(
+            {
+                "ada_event": "preview_skill_app",
+                "run_id": run_id,
+                "skill_name": tool_name,
+            }
+        )
+        yield "data: [DONE]\n\n"
+
+    return True, _pause_events()
+
+
+async def continue_tool_build(
+    *,
+    run_id: str,
+    plan_id: str,
+    tool_name: str,
+    tool_code: str,
+    test_code: str,
+    requirements: list[str],
+    manifest: dict | None,
+    creator_model: str,
+    litellm_url: str,
+    litellm_headers: dict[str, str],
+    step: Callable[..., str],
+    phase: Callable[..., str],
+    blog: Callable[..., str],
+    sse_data: Callable[[dict], str],
+    cancelled: Callable[[], Any],
+    reasoning_effort: str | None = None,
+    preview_already_installed: bool = False,
+) -> AsyncIterator[str]:
+    """Continue after sandbox (and optional UI preview approval): pip gate then install."""
+    paused, pause_events, new_packages = await maybe_pause_for_pip_approval(
+        run_id=run_id,
+        plan_id=plan_id,
+        tool_name=tool_name,
+        tool_code=tool_code,
+        test_code=test_code,
+        requirements=requirements,
+        manifest=manifest,
+        creator_model=creator_model,
+        step=step,
+        phase=phase,
+        sse_data=sse_data,
+        reasoning_effort=reasoning_effort,
+    )
+    if paused and pause_events:
+        async for event in pause_events:
+            yield event
+        return
+
+    if preview_already_installed:
+        yield step("runtime_verify", "Verifying in tool runtime", "done")
+        yield phase("runtime_verify", "done")
+        yield step("install_tool", "Installing tool", "done")
+        yield phase("install_tool", "done")
+        yield blog("Tool installed successfully.")
+        log_build_event(
+            run_id,
+            phase="install_tool",
+            message=f"installed {tool_name} after UI preview approval",
+        )
+        yield sse_data(
+            {
+                "ada_event": "tool_installed",
+                "run_id": run_id,
+                "tool_name": tool_name,
+                "message": f"Tool '{tool_name}' installed in the persistent tool runtime.",
+            }
+        )
+        yield "data: [DONE]\n\n"
+        return
+
+    async for event in stream_runtime_install(
+        run_id=run_id,
+        plan_id=plan_id,
+        tool_name=tool_name,
+        tool_code=tool_code,
+        test_code=test_code,
+        requirements=requirements,
+        manifest=manifest,
+        new_packages=new_packages,
+        creator_model=creator_model,
+        litellm_url=litellm_url,
+        litellm_headers=litellm_headers,
+        step=step,
+        phase=phase,
+        blog=blog,
+        sse_data=sse_data,
+        cancelled=cancelled,
+        skip_pip=True,
+        reasoning_effort=reasoning_effort,
+    ):
+        yield event
+
+
 async def run_sandbox_phase(
     *,
     run_id: str,
     tool_name: str,
     tool_code: str,
     test_code: str,
+    manifest: dict | None = None,
     creator_model: str,
     litellm_url: str,
     headers: dict[str, str],
@@ -312,7 +521,9 @@ async def run_sandbox_phase(
         if await cancelled():
             return False, log_output, current_test, current_tool, notices
 
-        success, log_output = verify_tool_in_sandbox(tool_name, current_tool, current_test)
+        success, log_output = verify_tool_in_sandbox(
+            tool_name, current_tool, current_test, manifest=manifest
+        )
         if success:
             return True, log_output, current_test, current_tool, notices
 
@@ -323,12 +534,18 @@ async def run_sandbox_phase(
                     f"Sandbox failed (attempt {attempt + 1}) — auto-fixing test_code…",
                 )
             )
+            fix_hint = ""
+            if "Read-only file system" in log_output or "Errno 30" in log_output:
+                fix_hint = (
+                    "\n\nNote: /workspace/skill_data should be writable for interactive skills. "
+                    "If persistence still fails, mock only non-skill_data filesystem calls."
+                )
             try:
                 current_test = await fix_test_code(
                     tool_name,
                     current_tool,
                     current_test,
-                    log_output,
+                    log_output + fix_hint,
                     creator_model,
                     litellm_url=litellm_url,
                     headers=headers,
@@ -336,7 +553,12 @@ async def run_sandbox_phase(
                     reasoning_effort=reasoning_effort,
                 )
                 continue
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "fix_test_code failed for %s (attempt %s): %s",
+                    tool_name,
+                    attempt + 1,
+                    exc,
+                )
         return False, log_output, current_test, current_tool, notices
     return False, log_output, current_test, current_tool, notices

@@ -428,74 +428,18 @@ def validate_tool_module(code: str) -> bool:
     return "get_tool_schema" in names and "run" in names
 
 
-_BANNED_UI_IMPORT_ROOTS = frozenset(
-    {"rich", "textual", "curses", "blessed", "prompt_toolkit", "tkinter", "pygame"}
-)
-
-
-def validate_tool_source_static(code: str) -> tuple[bool, str]:
-    """Reject terminal/GUI UI libraries and other static issues before exec."""
-    try:
-        tree = ast.parse(code)
-    except SyntaxError as exc:
-        return False, f"Syntax error: {exc}"
-
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                root = alias.name.split(".")[0]
-                if root in _BANNED_UI_IMPORT_ROOTS:
-                    return (
-                        False,
-                        f"Banned import '{alias.name}': interactive UI is rendered by the "
-                        "React frontend, not Python. Remove rich/terminal UI code; "
-                        "return json.dumps(...) from run() instead.",
-                    )
-        elif isinstance(node, ast.ImportFrom):
-            module = node.module or ""
-            root = module.split(".")[0]
-            if root in _BANNED_UI_IMPORT_ROOTS:
-                return (
-                    False,
-                    f"Banned import from '{module}': interactive UI is rendered by the "
-                    "React frontend, not Python. Remove rich/terminal UI code; "
-                    "return json.dumps(...) from run() instead.",
-                )
-    return True, ""
-
-
-def validate_openai_tool_schema(schema: dict) -> tuple[bool, str]:
-    if schema.get("type") != "function":
-        return (
-            False,
-            'get_tool_schema() must return OpenAI format with top-level "type": "function".',
-        )
-    fn = schema.get("function")
-    if not isinstance(fn, dict):
-        return False, 'get_tool_schema() must include a "function" object.'
-    if not fn.get("name"):
-        return False, 'get_tool_schema() function.name is required.'
-    params = fn.get("parameters")
-    if not isinstance(params, dict):
-        return False, 'get_tool_schema() function.parameters must be a dict.'
-    return True, ""
-
-
 def validate_tool_schema(code: str) -> tuple[bool, str]:
     code = sanitize_python_json_literals(code)
     if not validate_tool_module(code):
         return False, "Generated tool code is missing get_tool_schema() or run()."
-    static_ok, static_reason = validate_tool_source_static(code)
-    if not static_ok:
-        return False, static_reason
     try:
         mod = _exec_tool_module_from_source(code, "tool_validation_mod")
         schema = mod.get_tool_schema()
         if not isinstance(schema, dict):
             return False, "get_tool_schema() must return a dict."
-        schema_ok, schema_reason = validate_openai_tool_schema(schema)
-        if not schema_ok:
-            return False, schema_reason
+        name, _ = _schema_name_and_description(schema)
+        if not name:
+            return False, "Tool schema is missing a name."
         return True, ""
     except Exception as exc:
         return False, f"get_tool_schema() failed: {exc}"

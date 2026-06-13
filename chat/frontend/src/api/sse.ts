@@ -71,6 +71,7 @@ export type BuildStreamResult =
   | { status: 'success'; message: string }
   | { status: 'failed'; reason?: string; logs?: string }
   | { status: 'pip_pending' }
+  | { status: 'preview_pending' }
   | null
 
 export async function consumeBuildStream(
@@ -102,6 +103,8 @@ export async function consumeBuildStream(
 
         if (json.ada_event === 'pip_install_pending') {
           buildResult = { status: 'pip_pending' }
+        } else if (json.ada_event === 'ui_preview_pending') {
+          buildResult = { status: 'preview_pending' }
         } else if (json.ada_event === 'tool_installed') {
           buildResult = { status: 'success', message: json.message || 'Skill installed.' }
         } else if (json.ada_event === 'tool_build_failed') {
