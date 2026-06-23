@@ -277,6 +277,8 @@ PROMPT_KEYS = (
 CONFIG_DIR = Path(__file__).parent / "staging"
 CONFIG_PATH = CONFIG_DIR / "prompts_config.json"
 LEGACY_GUIDANCE_PATH = CONFIG_DIR / "forger_guidance.json"
+PROMPTS_DEFAULTS_REVISION = 2
+CONFIG_REVISION_KEY = "_defaults_revision"
 
 
 class PromptsConfig(TypedDict):
@@ -316,6 +318,39 @@ _cache: PromptsConfig | None = None
 _LEGACY_KEY_MAP = {
     "forger_runtime_context": "forge_runtime_context",
 }
+
+
+def _migrate_stale_prompts(config: PromptsConfig) -> PromptsConfig:
+    """Replace saved prompts that still contain retired default text."""
+    defaults = default_prompts_config()
+    stale_markers = (
+        "Do not create tools for microphone",
+        "Tools cannot access local user hardware",
+        "or requests involving microphone, camera, speakers",
+        "headless Docker container",
+    )
+    updated = dict(config)
+    changed = False
+    for key in PROMPT_KEYS:
+        value = updated.get(key, "")
+        if not isinstance(value, str):
+            continue
+        if any(marker in value for marker in stale_markers):
+            updated[key] = defaults[key]  # type: ignore[literal-required]
+            changed = True
+    if changed:
+        return save_prompts_config(updated)
+    return config  # type: ignore[return-value]
+
+
+def reset_prompts_config() -> PromptsConfig:
+    """Reload prompt defaults from source and persist them."""
+    global _cache
+    import importlib
+
+    mod = importlib.reload(importlib.import_module(__name__))
+    _cache = None
+    return mod.save_prompts_config(mod.default_prompts_config())
 
 
 def default_prompts_config() -> PromptsConfig:
@@ -375,18 +410,23 @@ def load_prompts_config(*, refresh: bool = False) -> PromptsConfig:
         try:
             raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
             if isinstance(raw, dict):
-                _cache = _normalize_config(raw)
+                revision = raw.get(CONFIG_REVISION_KEY, 0)
+                if not isinstance(revision, int):
+                    revision = 0
+                if revision < PROMPTS_DEFAULTS_REVISION:
+                    _cache = save_prompts_config(default_prompts_config())
+                    return _cache
+                _cache = _migrate_stale_prompts(_normalize_config(raw))
                 return _cache
         except (OSError, json.JSONDecodeError):
             pass
 
     legacy = _load_legacy_guidance()
     if legacy:
-        _cache = _normalize_config(legacy)
-        save_prompts_config(_cache)
+        _cache = save_prompts_config(_normalize_config(legacy))
         return _cache
 
-    _cache = default_prompts_config()
+    _cache = save_prompts_config(default_prompts_config())
     return _cache
 
 
@@ -394,8 +434,9 @@ def save_prompts_config(data: dict) -> PromptsConfig:
     global _cache
     merged = _normalize_config(data)
     CONFIG_DIR.mkdir(exist_ok=True)
+    payload = {CONFIG_REVISION_KEY: PROMPTS_DEFAULTS_REVISION, **merged}
     CONFIG_PATH.write_text(
-        json.dumps(merged, indent=2, ensure_ascii=False) + "\n",
+        json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
     _cache = merged

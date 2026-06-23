@@ -15,6 +15,7 @@ from prompts_config import (
     default_prompts_config,
     load_prompts_config,
     prompts_config_response,
+    reset_prompts_config,
     save_prompts_config,
 )
 from build_pipeline import (
@@ -885,7 +886,7 @@ async def update_prompts(payload: dict = Body(...)) -> dict:
 
 @app.post("/api/prompts/reset")
 async def reset_prompts() -> dict:
-    save_prompts_config(default_prompts_config())
+    reset_prompts_config()
     return prompts_config_response()
 
 
@@ -906,11 +907,16 @@ async def update_forger_guidance(payload: dict = Body(...)) -> dict:
 
 @app.post("/api/forger-guidance/reset")
 async def reset_forger_guidance() -> dict:
-    defaults = default_prompts_config()
+    import importlib
+    import prompts_config as pc_mod
+
+    pc_mod = importlib.reload(pc_mod)
     save_prompts_config(
         {
-            **load_prompts_config(),
-            "forge_runtime_context": defaults["forge_runtime_context"],
+            **load_prompts_config(refresh=True),
+            "forge_runtime_context": pc_mod.default_prompts_config()[
+                "forge_runtime_context"
+            ],
         }
     )
     return await get_forger_guidance()
