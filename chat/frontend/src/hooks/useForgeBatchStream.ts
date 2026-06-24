@@ -7,7 +7,7 @@ import {
   rejectForgeBatchPlan,
 } from '../api/client'
 import { consumeBuildStream, consumeSseStream } from '../api/sse'
-import { buildMessages, useAppStore } from '../state/store'
+import { useAppStore } from '../state/store'
 import {
   createDefaultViewerPhases,
   createForgeBatchColumn,
@@ -16,6 +16,7 @@ import {
   type PhaseStatus,
 } from '../types/events'
 import { captureSkillAppForTool } from '../utils/captureSkillAppScreenshot'
+import { runScoutResumeStream } from '../lib/runScoutResumeStream'
 
 function resolvePlanId(json: AdaEvent & { plan_id?: string; tool_name?: string }): string | undefined {
   if ('plan_id' in json && json.plan_id) {
@@ -206,41 +207,12 @@ export function useForgeBatchStream() {
     const batch = useAppStore.getState().forgeBatch
     if (!batch) return
 
-    try {
-      await consumeSseStream({
-        url: '/api/forge_batch/resume_agent',
-        body: {
-          batch_id: batch.batchId,
-          model: store.chatModel,
-          tool_creator_model: store.toolCreatorModel,
-          reasoning_effort: store.thinkingEffort,
-          messages: buildMessages(),
-        },
-        onPayload: (json) => {
-          if (!isAdaEvent(json)) return
-          if (json.ada_event === 'chat_error') {
-            store.setStatus(json.detail || 'Resume failed.', true)
-            return
-          }
-          if (json.ada_event === 'process_step') {
-            store.updateProcessStep(json.run_id, json.step_id, {
-              label: json.label,
-              status: json.status,
-              model: json.model,
-              detail: json.detail,
-            })
-          }
-        },
-      })
-      store.pushConversation({
-        role: 'assistant',
-        content: '[System] Multi-tool forge batch complete.',
-      })
-    } catch (error) {
-      const err = error as Error
-      store.setStatus(`Resume failed: ${err.message}`, true)
-    }
-  }, [store])
+    await runScoutResumeStream({
+      url: '/api/forge_batch/resume_agent',
+      runId: batch.runId,
+      body: { batch_id: batch.batchId },
+    })
+  }, [])
 
   const refreshToolsAfterBatch = useCallback(() => {
     void import('../api/client').then(({ fetchTools, fetchPipPackages }) => {
@@ -288,7 +260,7 @@ export function useForgeBatchStream() {
     try {
       await consumeSseStream({
         url: '/api/forge_batch/confirm',
-        body: { batch_id: batch.batchId },
+        body: { batch_id: batch.batchId, gemini_google_search: store.geminiGoogleSearch },
         signal: controller.signal,
         onPayload: (json) => {
           if (!isAdaEvent(json)) return
@@ -377,6 +349,7 @@ export function useForgeBatchStream() {
             plan_id: planId,
             feedback,
             reasoning_effort: store.thinkingEffort,
+            gemini_google_search: store.geminiGoogleSearch,
           },
           signal: controller.signal,
           onPayload: (json) => {
@@ -427,6 +400,7 @@ export function useForgeBatchStream() {
             plan_id: planId || undefined,
             tool_creator_model: store.toolCreatorModel,
             reasoning_effort: store.thinkingEffort,
+            gemini_google_search: store.geminiGoogleSearch,
           }),
           signal: controller.signal,
         })
@@ -483,6 +457,7 @@ export function useForgeBatchStream() {
             pip_id: pipId,
             run_id: batch.runId,
             reasoning_effort: store.thinkingEffort,
+            gemini_google_search: store.geminiGoogleSearch,
           }),
           signal: controller.signal,
         })
@@ -537,6 +512,7 @@ export function useForgeBatchStream() {
             preview_id: col.uiPreview.previewId,
             run_id: batch.runId,
             reasoning_effort: store.thinkingEffort,
+            gemini_google_search: store.geminiGoogleSearch,
           }),
           signal: controller.signal,
         })
@@ -599,6 +575,7 @@ export function useForgeBatchStream() {
             feedback,
             screenshot_base64: screenshotBase64,
             reasoning_effort: store.thinkingEffort,
+            gemini_google_search: store.geminiGoogleSearch,
           }),
           signal: controller.signal,
         })

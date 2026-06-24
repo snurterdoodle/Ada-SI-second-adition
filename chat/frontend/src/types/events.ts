@@ -195,6 +195,11 @@ export type UserFeedItem = {
   content: string
 }
 
+export type SearchSource = {
+  title: string
+  url: string
+}
+
 export type AssistantFeedItem = {
   id: string
   type: 'assistant'
@@ -202,6 +207,7 @@ export type AssistantFeedItem = {
   content: string
   streaming: boolean
   hidden?: boolean
+  searchSources?: SearchSource[]
 }
 
 export type ToolPlanFeedItem = {
@@ -234,6 +240,7 @@ export type AdaEventType =
   | 'open_skill_app'
   | 'skill_data_changed'
   | 'chat_error'
+  | 'search_sources'
   | 'forge_batch_proposed'
   | 'forge_batch_plan_phase_started'
   | 'forge_batch_plan_phase_done'
@@ -377,6 +384,11 @@ export type AdaEvent =
   | { ada_event: 'open_skill_app'; run_id: string; skill_name: string }
   | { ada_event: 'skill_data_changed'; run_id: string; skill_name: string }
   | { ada_event: 'chat_error'; run_id?: string; detail?: string }
+  | {
+      ada_event: 'search_sources'
+      run_id: string
+      sources: SearchSource[]
+    }
   | {
       ada_event: 'forge_batch_proposed'
       run_id: string

@@ -287,6 +287,29 @@ def build_resume_summary(batch: dict) -> str:
     return "Multi-tool forge batch results:\n" + "\n".join(lines)
 
 
+_SCOUT_RESUME_SUFFIX = """The tool(s) above are installed and available now. Continue helping the user:
+- Call the relevant tool to fulfill their original request when applicable.
+- Do not call generate_new_tool or propose_tool_batch for the same capability again.
+- Give a helpful reply with results or next steps."""
+
+
+def build_scout_resume_message(details: str) -> str:
+    return f"[System] Tool forge completed.\n\n{details.strip()}\n\n{_SCOUT_RESUME_SUFFIX}"
+
+
+def build_single_tool_scout_resume_message(tool_name: str, message: str = "") -> str:
+    line = f"- {tool_name}: installed"
+    if message.strip():
+        line += f" ({message.strip()})"
+    return build_scout_resume_message(line)
+
+
+def build_batch_scout_resume_message(batch: dict) -> str:
+    summary = build_resume_summary(batch)
+    details = summary.replace("Multi-tool forge batch results:\n", "", 1)
+    return build_scout_resume_message(details)
+
+
 async def stream_batch_plan_draft(
     *,
     batch_id: str,

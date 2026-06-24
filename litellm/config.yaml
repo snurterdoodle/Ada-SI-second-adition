@@ -13,6 +13,7 @@ model_list:
     litellm_params:
       model: gemini/*
       api_key: os.environ/GEMINI_API_KEY
+      allowed_openai_params: ["reasoning_effort", "include_server_side_tool_invocations"]
 
   - model_name: groq/*
     litellm_params:

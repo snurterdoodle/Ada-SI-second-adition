@@ -5,6 +5,7 @@ import { VIEWER_PHASES } from '../constants'
 import { useAppStore } from '../state/store'
 import { isAdaEvent, type AdaEvent } from '../types/events'
 import { captureSkillAppForTool } from '../utils/captureSkillAppScreenshot'
+import { runScoutResumeStream } from '../lib/runScoutResumeStream'
 
 export function useToolBuildStream() {
   const store = useAppStore()
@@ -136,6 +137,20 @@ export function useToolBuildStream() {
     [store, refreshTools],
   )
 
+  const resumeScoutAfterTool = useCallback(
+    async (runId: string, toolName: string, message: string) => {
+      await runScoutResumeStream({
+        url: '/api/resume_scout',
+        runId,
+        body: {
+          tool_name: toolName,
+          message,
+        },
+      })
+    },
+    [],
+  )
+
   const processBuildResult = useCallback(
     async (
       cardId: string,
@@ -146,11 +161,18 @@ export function useToolBuildStream() {
         await refreshPackages()
         store.setUiPreview(cardId, undefined)
         store.showViewerSuccess(cardId, buildResult.message)
-        store.pushConversation({
-          role: 'assistant',
-          content: `[System] ${buildResult.message}`,
-        })
         store.setStatus('')
+
+        const item = useAppStore.getState().feed.find(
+          (f) => f.id === cardId && f.type === 'tool-plan',
+        )
+        if (item && item.type === 'tool-plan') {
+          await resumeScoutAfterTool(
+            item.card.runId,
+            item.card.toolName,
+            buildResult.message,
+          )
+        }
       } else if (buildResult?.status === 'preview_pending') {
         store.updateToolPlanCard(cardId, { busy: false })
         store.setStatus('Try the app preview, then approve or request changes.')
@@ -170,7 +192,7 @@ export function useToolBuildStream() {
         )
       }
     },
-    [store, refreshTools, refreshPackages],
+    [store, refreshTools, refreshPackages, resumeScoutAfterTool],
   )
 
   const runToolBuild = useCallback(
@@ -197,6 +219,7 @@ export function useToolBuildStream() {
             run_id: effectiveRunId,
             tool_creator_model: store.toolCreatorModel,
             reasoning_effort: store.thinkingEffort,
+            gemini_google_search: store.geminiGoogleSearch,
           }),
           signal: controller.signal,
         })
@@ -252,6 +275,7 @@ export function useToolBuildStream() {
             pip_id: pipId,
             run_id: effectiveRunId,
             reasoning_effort: store.thinkingEffort,
+            gemini_google_search: store.geminiGoogleSearch,
           }),
           signal: controller.signal,
         })
@@ -331,6 +355,7 @@ export function useToolBuildStream() {
             preview_id: previewId,
             run_id: effectiveRunId,
             reasoning_effort: store.thinkingEffort,
+            gemini_google_search: store.geminiGoogleSearch,
           }),
           signal: controller.signal,
         })
@@ -460,6 +485,7 @@ export function useToolBuildStream() {
             feedback,
             tool_creator_model: store.toolCreatorModel,
             reasoning_effort: store.thinkingEffort,
+            gemini_google_search: store.geminiGoogleSearch,
           },
           signal: controller.signal,
           onPayload: (json) => {

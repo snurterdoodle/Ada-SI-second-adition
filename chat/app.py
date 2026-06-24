@@ -27,6 +27,8 @@ from forge_batch import (
     batch_sse,
     batch_terminal,
     build_resume_summary,
+    build_batch_scout_resume_message,
+    build_single_tool_scout_resume_message,
     cancel_batch,
     create_batch,
     get_pending_batch,
@@ -71,6 +73,10 @@ from litellm_client import (
     ThinkStreamParser,
     extract_stream_delta,
     extract_stream_tool_calls,
+    extract_search_sources_from_chunk,
+    extract_search_sources_from_message,
+    is_gemini_model,
+    merge_search_sources,
     merge_tool_call_delta,
     new_stream_chunk_id,
     openai_stream_chunk,
@@ -88,6 +94,7 @@ from tool_creator import (
     draft_tool_edit_plan_stream,
     draft_tool_plan_stream,
     fix_validation_errors,
+    forge_google_search_context,
     generate_tool_code_stream,
     normalize_preview_screenshot,
     parse_generated_tool_response,
@@ -244,6 +251,11 @@ def resolve_reasoning_effort(
     return normalize_reasoning_effort(fallback) or fallback
 
 
+def resolve_gemini_google_search(payload: dict, model: str) -> bool:
+    """True when the user enabled search and the given model is Gemini."""
+    return bool(payload.get("gemini_google_search")) and is_gemini_model(model)
+
+
 async def stream_lite_model_turn(
     run_id: str,
     lite_model: str,
@@ -251,6 +263,7 @@ async def stream_lite_model_turn(
     tools: list[dict],
     *,
     reasoning_effort: str | None = None,
+    gemini_google_search: bool = False,
 ):
     """Stream one lite-model completion; yield OpenAI SSE strings and final message."""
     chunk_id = new_stream_chunk_id()
@@ -259,6 +272,7 @@ async def stream_lite_model_turn(
     reasoning_acc = ""
     saw_tool_call = False
     think_parser = ThinkStreamParser()
+    search_sources_acc: dict[str, dict[str, str]] = {}
 
     log_debug(run_id, "LITE_MODEL", f"streaming completion model={lite_model}")
 
@@ -269,7 +283,14 @@ async def stream_lite_model_turn(
         working_messages,
         tools=tools,
         reasoning_effort=reasoning_effort or LITE_MODEL_REASONING_EFFORT,
+        gemini_google_search=gemini_google_search,
     ):
+        if gemini_google_search:
+            merge_search_sources(
+                search_sources_acc,
+                extract_search_sources_from_chunk(chunk),
+            )
+
         tc_deltas = extract_stream_tool_calls(chunk)
         if tc_deltas:
             saw_tool_call = True
@@ -309,6 +330,20 @@ async def stream_lite_model_turn(
         reasoning=reasoning_acc,
         tool_calls=tool_calls,
     )
+
+    if gemini_google_search:
+        merge_search_sources(
+            search_sources_acc,
+            extract_search_sources_from_message(message),
+        )
+        if search_sources_acc:
+            yield sse_data(
+                {
+                    "ada_event": "search_sources",
+                    "run_id": run_id,
+                    "sources": list(search_sources_acc.values()),
+                }
+            )
 
     yield sse_data(
         openai_stream_chunk(chunk_id=chunk_id, finish_reason="stop")
@@ -465,6 +500,8 @@ async def run_agent_stream(
     request: Request,
     *,
     reasoning_effort: str | None = None,
+    gemini_google_search: bool = False,
+    forge_gemini_google_search: bool = False,
 ):
     """Async generator that yields SSE strings as each process step occurs."""
     clear_run_cancelled(run_id)
@@ -496,7 +533,12 @@ async def run_agent_stream(
         tool_calls: list[dict] = []
 
         async for item in stream_lite_model_turn(
-            run_id, lite_model, working_messages, tools, reasoning_effort=reasoning_effort
+            run_id,
+            lite_model,
+            working_messages,
+            tools,
+            reasoning_effort=reasoning_effort,
+            gemini_google_search=gemini_google_search,
         ):
             if isinstance(item, str):
                 yield item
@@ -629,22 +671,23 @@ async def run_agent_stream(
                         return
 
                     plan_out: dict[str, str] = {}
-                    async for event in stream_plan_draft_events(
-                        run_id,
-                        tool_name,
-                        draft_tool_plan_stream(
+                    with forge_google_search_context(forge_gemini_google_search):
+                        async for event in stream_plan_draft_events(
+                            run_id,
                             tool_name,
-                            description,
-                            tool_creator_model,
-                            litellm_url=LITELLM_URL,
-                            headers=litellm_headers(),
-                            run_id=run_id,
-                            reasoning_effort=reasoning_effort,
-                        ),
-                        kind="create",
-                        out=plan_out,
-                    ):
-                        yield event
+                            draft_tool_plan_stream(
+                                tool_name,
+                                description,
+                                tool_creator_model,
+                                litellm_url=LITELLM_URL,
+                                headers=litellm_headers(),
+                                run_id=run_id,
+                                reasoning_effort=reasoning_effort,
+                            ),
+                            kind="create",
+                            out=plan_out,
+                        ):
+                            yield event
                     plan = plan_out.get("plan", "")
                     log_plan(run_id, tool_name=tool_name, plan=plan, action="drafted")
 
@@ -749,25 +792,26 @@ async def run_agent_stream(
                     )
 
                     plan_out: dict[str, str] = {}
-                    async for event in stream_plan_draft_events(
-                        run_id,
-                        tool_name,
-                        draft_tool_edit_plan_stream(
+                    with forge_google_search_context(forge_gemini_google_search):
+                        async for event in stream_plan_draft_events(
+                            run_id,
                             tool_name,
-                            description,
-                            existing_code,
-                            existing_reqs,
-                            tool_creator_model,
-                            litellm_url=LITELLM_URL,
-                            headers=litellm_headers(),
-                            run_id=run_id,
-                            existing_manifest=existing_manifest,
-                            reasoning_effort=reasoning_effort,
-                        ),
-                        kind="edit",
-                        out=plan_out,
-                    ):
-                        yield event
+                            draft_tool_edit_plan_stream(
+                                tool_name,
+                                description,
+                                existing_code,
+                                existing_reqs,
+                                tool_creator_model,
+                                litellm_url=LITELLM_URL,
+                                headers=litellm_headers(),
+                                run_id=run_id,
+                                existing_manifest=existing_manifest,
+                                reasoning_effort=reasoning_effort,
+                            ),
+                            kind="edit",
+                            out=plan_out,
+                        ):
+                            yield event
                     plan = plan_out.get("plan", "")
                     log_plan(run_id, tool_name=tool_name, plan=plan, action="edit_drafted")
 
@@ -1228,6 +1272,8 @@ async def chat(request: Request) -> StreamingResponse:
     messages = body.get("messages")
     run_id = body.get("run_id") or uuid.uuid4().hex
     reasoning_effort = resolve_reasoning_effort(body.get("reasoning_effort"))
+    gemini_google_search = resolve_gemini_google_search(body, lite_model)
+    forge_gemini_google_search = resolve_gemini_google_search(body, tool_creator_model)
 
     if not lite_model:
         raise HTTPException(status_code=400, detail="No lite model selected.")
@@ -1235,94 +1281,168 @@ async def chat(request: Request) -> StreamingResponse:
         raise HTTPException(status_code=400, detail="messages must be a non-empty list.")
 
     async def event_stream():
-        try:
-            async for item in run_agent_stream(
-                run_id,
-                lite_model,
-                tool_creator_model,
-                messages,
-                request,
-                reasoning_effort=reasoning_effort,
-            ):
-                if await request.is_disconnected():
-                    return
+        async for chunk in stream_agent_sse(
+            run_id=run_id,
+            lite_model=lite_model,
+            tool_creator_model=tool_creator_model,
+            messages=messages,
+            request=request,
+            reasoning_effort=reasoning_effort,
+            gemini_google_search=gemini_google_search,
+            forge_gemini_google_search=forge_gemini_google_search,
+        ):
+            yield chunk
 
-                if isinstance(item, str):
-                    yield item
-                    continue
+    return StreamingResponse(
+        event_stream(), media_type="text/event-stream", headers=SSE_HEADERS
+    )
 
-                if item.get("_event") == "plan":
-                    yield sse_data(
-                        {
-                            "ada_event": "tool_plan_pending",
-                            "run_id": item["run_id"],
-                            "plan_id": item["plan_id"],
-                            "tool_name": item["tool_name"],
-                            "plan": item["plan"],
-                            "kind": item.get("kind", "create"),
-                        }
-                    )
-                    yield "data: [DONE]\n\n"
-                    return
 
-                if item.get("_event") == "forge_batch_proposed":
-                    yield sse_data(
-                        {
-                            "ada_event": "forge_batch_proposed",
-                            "run_id": item["run_id"],
-                            "batch_id": item["batch_id"],
-                            "summary": item["summary"],
-                            "tools": item["tools"],
-                        }
-                    )
-                    yield "data: [DONE]\n\n"
-                    return
+async def stream_agent_sse(
+    *,
+    run_id: str,
+    lite_model: str,
+    tool_creator_model: str,
+    messages: list[dict],
+    request: Request,
+    reasoning_effort: str | None,
+    gemini_google_search: bool = False,
+    forge_gemini_google_search: bool = False,
+):
+    """Yield SSE chunks from a Scout agent run (shared by chat and resume endpoints)."""
+    try:
+        async for item in run_agent_stream(
+            run_id,
+            lite_model,
+            tool_creator_model,
+            messages,
+            request,
+            reasoning_effort=reasoning_effort,
+            gemini_google_search=gemini_google_search,
+            forge_gemini_google_search=forge_gemini_google_search,
+        ):
+            if await request.is_disconnected():
+                return
 
-                if item.get("_event") == "done":
-                    yield "data: [DONE]\n\n"
-                    return
+            if isinstance(item, str):
+                yield item
+                continue
 
-                if item.get("_event") == "open_skill_app":
-                    yield sse_data(
-                        {
-                            "ada_event": "open_skill_app",
-                            "run_id": item["run_id"],
-                            "skill_name": item["skill_name"],
-                        }
-                    )
-                    continue
+            if item.get("_event") == "plan":
+                yield sse_data(
+                    {
+                        "ada_event": "tool_plan_pending",
+                        "run_id": item["run_id"],
+                        "plan_id": item["plan_id"],
+                        "tool_name": item["tool_name"],
+                        "plan": item["plan"],
+                        "kind": item.get("kind", "create"),
+                    }
+                )
+                yield "data: [DONE]\n\n"
+                return
 
-                if item.get("_event") == "skill_data_changed":
-                    yield sse_data(
-                        {
-                            "ada_event": "skill_data_changed",
-                            "run_id": item["run_id"],
-                            "skill_name": item["skill_name"],
-                        }
-                    )
-                    continue
-        except HTTPException as exc:
-            log_error(run_id, "CHAT", f"HTTPException: {exc.detail}")
-            yield process_step(
-                run_id,
-                "lite_model",
-                "Request failed",
-                "error",
-                detail=str(exc.detail),
+            if item.get("_event") == "forge_batch_proposed":
+                yield sse_data(
+                    {
+                        "ada_event": "forge_batch_proposed",
+                        "run_id": item["run_id"],
+                        "batch_id": item["batch_id"],
+                        "summary": item["summary"],
+                        "tools": item["tools"],
+                    }
+                )
+                yield "data: [DONE]\n\n"
+                return
+
+            if item.get("_event") == "done":
+                yield "data: [DONE]\n\n"
+                return
+
+            if item.get("_event") == "open_skill_app":
+                yield sse_data(
+                    {
+                        "ada_event": "open_skill_app",
+                        "run_id": item["run_id"],
+                        "skill_name": item["skill_name"],
+                    }
+                )
+                continue
+
+            if item.get("_event") == "skill_data_changed":
+                yield sse_data(
+                    {
+                        "ada_event": "skill_data_changed",
+                        "run_id": item["run_id"],
+                        "skill_name": item["skill_name"],
+                    }
+                )
+                continue
+    except HTTPException as exc:
+        log_error(run_id, "CHAT", f"HTTPException: {exc.detail}")
+        yield process_step(
+            run_id,
+            "lite_model",
+            "Request failed",
+            "error",
+            detail=str(exc.detail),
+        )
+        yield sse_data({"ada_event": "chat_error", "run_id": run_id, "detail": exc.detail})
+        yield "data: [DONE]\n\n"
+    except httpx.RequestError as exc:
+        detail = f"LiteLLM unreachable: {exc}"
+        log_error(run_id, "CHAT", detail)
+        yield process_step(run_id, "lite_model", "Request failed", "error", detail=detail)
+        yield sse_data({"ada_event": "chat_error", "run_id": run_id, "detail": detail})
+        yield "data: [DONE]\n\n"
+    except RuntimeError as exc:
+        log_error(run_id, "CHAT", str(exc))
+        yield process_step(run_id, "lite_model", "Request failed", "error", detail=str(exc))
+        yield sse_data({"ada_event": "chat_error", "run_id": run_id, "detail": str(exc)})
+        yield "data: [DONE]\n\n"
+
+
+@app.post("/api/resume_scout")
+async def resume_scout(request: Request, payload: dict = Body(...)) -> StreamingResponse:
+    lite_model = (payload.get("model") or LITE_MODEL).strip()
+    tool_creator_model = (
+        payload.get("tool_creator_model") or TOOL_CREATOR_MODEL
+    ).strip()
+    messages = payload.get("messages")
+    run_id = payload.get("run_id", "").strip() or uuid.uuid4().hex
+    reasoning_effort = resolve_reasoning_effort(payload.get("reasoning_effort"))
+    gemini_google_search = resolve_gemini_google_search(payload, lite_model)
+    forge_gemini_google_search = resolve_gemini_google_search(payload, tool_creator_model)
+    tool_name = payload.get("tool_name", "").strip()
+    install_message = payload.get("message", "").strip()
+    context = payload.get("context", "").strip()
+
+    if not lite_model:
+        raise HTTPException(status_code=400, detail="No lite model selected.")
+    if not isinstance(messages, list) or not messages:
+        raise HTTPException(status_code=400, detail="messages must be a non-empty list.")
+    if not context:
+        if not tool_name:
+            raise HTTPException(
+                status_code=400,
+                detail="tool_name or context is required.",
             )
-            yield sse_data({"ada_event": "chat_error", "run_id": run_id, "detail": exc.detail})
-            yield "data: [DONE]\n\n"
-        except httpx.RequestError as exc:
-            detail = f"LiteLLM unreachable: {exc}"
-            log_error(run_id, "CHAT", detail)
-            yield process_step(run_id, "lite_model", "Request failed", "error", detail=detail)
-            yield sse_data({"ada_event": "chat_error", "run_id": run_id, "detail": detail})
-            yield "data: [DONE]\n\n"
-        except RuntimeError as exc:
-            log_error(run_id, "CHAT", str(exc))
-            yield process_step(run_id, "lite_model", "Request failed", "error", detail=str(exc))
-            yield sse_data({"ada_event": "chat_error", "run_id": run_id, "detail": str(exc)})
-            yield "data: [DONE]\n\n"
+        context = build_single_tool_scout_resume_message(tool_name, install_message)
+
+    resume_messages = [*messages, {"role": "user", "content": context}]
+
+    async def event_stream():
+        async for chunk in stream_agent_sse(
+            run_id=run_id,
+            lite_model=lite_model,
+            tool_creator_model=tool_creator_model,
+            messages=resume_messages,
+            request=request,
+            reasoning_effort=reasoning_effort,
+            gemini_google_search=gemini_google_search,
+            forge_gemini_google_search=forge_gemini_google_search,
+        ):
+            yield chunk
 
     return StreamingResponse(
         event_stream(), media_type="text/event-stream", headers=SSE_HEADERS
@@ -1362,25 +1482,28 @@ async def approve_tool(request: Request, payload: dict = Body(...)) -> Streaming
     )
 
     async def approval_stream():
-        async for event in stream_tool_build(
-            plan_id=plan_id,
-            plan_data=plan_data,
-            run_id=run_id,
-            creator_model=creator_model,
-            reasoning_effort=reasoning_effort,
-            request=request,
-            litellm_url=LITELLM_URL,
-            litellm_headers=litellm_headers(),
-            pending_plans=PENDING_PLANS,
-            process_step=process_step,
-            tool_build_phase=tool_build_phase,
-            tool_build_log=tool_build_log,
-            sse_data=sse_data,
-            cancelled_events=cancelled_events,
-            is_run_cancelled=is_run_cancelled,
-            clear_run_cancelled=clear_run_cancelled,
+        with forge_google_search_context(
+            resolve_gemini_google_search(payload, creator_model)
         ):
-            yield event
+            async for event in stream_tool_build(
+                plan_id=plan_id,
+                plan_data=plan_data,
+                run_id=run_id,
+                creator_model=creator_model,
+                reasoning_effort=reasoning_effort,
+                request=request,
+                litellm_url=LITELLM_URL,
+                litellm_headers=litellm_headers(),
+                pending_plans=PENDING_PLANS,
+                process_step=process_step,
+                tool_build_phase=tool_build_phase,
+                tool_build_log=tool_build_log,
+                sse_data=sse_data,
+                cancelled_events=cancelled_events,
+                is_run_cancelled=is_run_cancelled,
+                clear_run_cancelled=clear_run_cancelled,
+            ):
+                yield event
 
     return StreamingResponse(
         approval_stream(), media_type="text/event-stream", headers=SSE_HEADERS
@@ -1401,18 +1524,22 @@ async def forge_batch_confirm(request: Request, payload: dict = Body(...)) -> St
     if batch.get("status") == "cancelled":
         raise HTTPException(status_code=400, detail="Batch was cancelled.")
 
-    async def confirm_stream():
-        async def cancelled() -> bool:
-            return is_run_cancelled(batch["run_id"]) or await request.is_disconnected()
+    creator_model = batch["creator_model"]
+    forge_search = resolve_gemini_google_search(payload, creator_model)
 
-        async for event in stream_parallel_plan_phase(
-            batch_id=batch_id,
-            litellm_url=LITELLM_URL,
-            headers=litellm_headers(),
-            pending_plans=PENDING_PLANS,
-            cancelled=cancelled,
-        ):
-            yield event
+    async def confirm_stream():
+        with forge_google_search_context(forge_search):
+            async def cancelled() -> bool:
+                return is_run_cancelled(batch["run_id"]) or await request.is_disconnected()
+
+            async for event in stream_parallel_plan_phase(
+                batch_id=batch_id,
+                litellm_url=LITELLM_URL,
+                headers=litellm_headers(),
+                pending_plans=PENDING_PLANS,
+                cancelled=cancelled,
+            ):
+                yield event
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(confirm_stream(), media_type="text/event-stream", headers=SSE_HEADERS)
@@ -1485,31 +1612,35 @@ async def forge_batch_revise_plan(request: Request, payload: dict = Body(...)) -
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    async def revise_stream():
-        async def cancelled() -> bool:
-            return is_run_cancelled(batch["run_id"]) or await request.is_disconnected()
+    creator_model = batch["creator_model"]
+    forge_search = resolve_gemini_google_search(payload, creator_model)
 
-        try:
-            async for event in stream_batch_plan_revision(
-                batch_id=batch_id,
-                plan_id=plan_id,
-                feedback=feedback,
-                litellm_url=LITELLM_URL,
-                headers=litellm_headers(),
-                pending_plans=PENDING_PLANS,
-                cancelled=cancelled,
-            ):
-                yield event
-        except ValueError as exc:
-            yield batch_sse(
-                {
-                    "ada_event": "forge_batch_plan_failed",
-                    "run_id": batch["run_id"],
-                    "reason": str(exc),
-                },
-                batch_id=batch_id,
-                plan_id=plan_id,
-            )
+    async def revise_stream():
+        with forge_google_search_context(forge_search):
+            async def cancelled() -> bool:
+                return is_run_cancelled(batch["run_id"]) or await request.is_disconnected()
+
+            try:
+                async for event in stream_batch_plan_revision(
+                    batch_id=batch_id,
+                    plan_id=plan_id,
+                    feedback=feedback,
+                    litellm_url=LITELLM_URL,
+                    headers=litellm_headers(),
+                    pending_plans=PENDING_PLANS,
+                    cancelled=cancelled,
+                ):
+                    yield event
+            except ValueError as exc:
+                yield batch_sse(
+                    {
+                        "ada_event": "forge_batch_plan_failed",
+                        "run_id": batch["run_id"],
+                        "reason": str(exc),
+                    },
+                    batch_id=batch_id,
+                    plan_id=plan_id,
+                )
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(revise_stream(), media_type="text/event-stream", headers=SSE_HEADERS)
@@ -1590,21 +1721,24 @@ async def forge_batch_start_build(request: Request, payload: dict = Body(...)) -
         ):
             yield event
 
+    forge_search = resolve_gemini_google_search(payload, creator_model)
+
     async def merged_stream():
-        generators = [build_one(pid) for pid in plan_ids]
-        async for event in merge_async_generators(generators):
-            yield event
-        batch_ref = get_pending_batch(batch_id)
-        if batch_terminal(batch_ref):
-            batch_ref["status"] = "complete"
-            yield batch_sse(
-                {
-                    "ada_event": "forge_batch_complete",
-                    "run_id": run_id,
-                    "summary": build_resume_summary(batch_ref),
-                },
-                batch_id=batch_id,
-            )
+        with forge_google_search_context(forge_search):
+            generators = [build_one(pid) for pid in plan_ids]
+            async for event in merge_async_generators(generators):
+                yield event
+            batch_ref = get_pending_batch(batch_id)
+            if batch_terminal(batch_ref):
+                batch_ref["status"] = "complete"
+                yield batch_sse(
+                    {
+                        "ada_event": "forge_batch_complete",
+                        "run_id": run_id,
+                        "summary": build_resume_summary(batch_ref),
+                    },
+                    batch_id=batch_id,
+                )
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(merged_stream(), media_type="text/event-stream", headers=SSE_HEADERS)
@@ -1628,45 +1762,29 @@ async def forge_batch_resume_agent(request: Request, payload: dict = Body(...)) 
     messages = payload.get("messages")
     run_id = batch.get("run_id") or uuid.uuid4().hex
     reasoning_effort = resolve_reasoning_effort(payload.get("reasoning_effort"))
+    gemini_google_search = resolve_gemini_google_search(payload, lite_model)
+    forge_gemini_google_search = resolve_gemini_google_search(payload, tool_creator_model)
 
     if not lite_model:
         raise HTTPException(status_code=400, detail="No lite model selected.")
     if not isinstance(messages, list):
         raise HTTPException(status_code=400, detail="messages must be a list.")
 
-    summary = build_resume_summary(batch)
-    resume_messages = [
-        *messages,
-        {
-            "role": "user",
-            "content": (
-                f"[System] Multi-tool forge batch completed.\n\n{summary}\n\n"
-                "Summarize what was installed for the user and suggest next steps."
-            ),
-        },
-    ]
+    summary = build_batch_scout_resume_message(batch)
+    resume_messages = [*messages, {"role": "user", "content": summary}]
 
     async def resume_stream():
-        try:
-            async for item in run_agent_stream(
-                run_id,
-                lite_model,
-                tool_creator_model,
-                resume_messages,
-                request,
-                reasoning_effort=reasoning_effort,
-            ):
-                if await request.is_disconnected():
-                    return
-                if isinstance(item, str):
-                    yield item
-                    continue
-                if item.get("_event") == "done":
-                    yield "data: [DONE]\n\n"
-                    return
-        except HTTPException as exc:
-            yield sse_data({"ada_event": "chat_error", "run_id": run_id, "detail": exc.detail})
-            yield "data: [DONE]\n\n"
+        async for chunk in stream_agent_sse(
+            run_id=run_id,
+            lite_model=lite_model,
+            tool_creator_model=tool_creator_model,
+            messages=resume_messages,
+            request=request,
+            reasoning_effort=reasoning_effort,
+            gemini_google_search=gemini_google_search,
+            forge_gemini_google_search=forge_gemini_google_search,
+        ):
+            yield chunk
 
     return StreamingResponse(resume_stream(), media_type="text/event-stream", headers=SSE_HEADERS)
 
@@ -1696,106 +1814,108 @@ async def approve_pip(request: Request, payload: dict = Body(...)) -> StreamingR
         payload.get("reasoning_effort") or pip_data.get("reasoning_effort"),
         default=TOOL_CREATOR_REASONING_EFFORT,
     )
+    forge_search = resolve_gemini_google_search(payload, creator_model)
 
     async def pip_stream():
-        clear_run_cancelled(run_id)
-        install_succeeded = False
+        with forge_google_search_context(forge_search):
+            clear_run_cancelled(run_id)
+            install_succeeded = False
 
-        def step(step_id: str, label: str, status: str, *, detail: str = ""):
-            if not run_id:
-                return ""
-            return process_step(
-                run_id,
-                step_id,
-                label,
-                status,
-                model=creator_model,
-                detail=detail,
-            )
-
-        def emit(payload: dict) -> str:
-            nonlocal install_succeeded
-            if payload.get("ada_event") == "tool_installed":
-                install_succeeded = True
-            return sse_data(
-                _batch_tag_payload(
-                    payload,
-                    batch_id=batch_id,
-                    plan_id=plan_id,
-                    tool_name=tool_name,
+            def step(step_id: str, label: str, status: str, *, detail: str = ""):
+                if not run_id:
+                    return ""
+                return process_step(
+                    run_id,
+                    step_id,
+                    label,
+                    status,
+                    model=creator_model,
+                    detail=detail,
                 )
-            )
 
-        def phase(step_id: str, status: str, *, detail: str = ""):
-            if batch_id:
-                return emit(
-                    {
-                        "ada_event": "tool_build_phase",
-                        "run_id": run_id,
-                        "phase": step_id,
-                        "status": status,
-                        "detail": detail,
-                    }
+            def emit(payload: dict) -> str:
+                nonlocal install_succeeded
+                if payload.get("ada_event") == "tool_installed":
+                    install_succeeded = True
+                return sse_data(
+                    _batch_tag_payload(
+                        payload,
+                        batch_id=batch_id,
+                        plan_id=plan_id,
+                        tool_name=tool_name,
+                    )
                 )
-            if not run_id:
-                return ""
-            return tool_build_phase(run_id, step_id, status, detail=detail)
 
-        def blog(message: str, *, level: str = "info"):
-            if batch_id:
-                return emit(
-                    {
-                        "ada_event": "tool_build_log",
-                        "run_id": run_id,
-                        "message": message,
-                        "level": level,
-                    }
-                )
-            if not run_id:
-                return ""
-            return tool_build_log(run_id, message, level=level)
+            def phase(step_id: str, status: str, *, detail: str = ""):
+                if batch_id:
+                    return emit(
+                        {
+                            "ada_event": "tool_build_phase",
+                            "run_id": run_id,
+                            "phase": step_id,
+                            "status": status,
+                            "detail": detail,
+                        }
+                    )
+                if not run_id:
+                    return ""
+                return tool_build_phase(run_id, step_id, status, detail=detail)
 
-        async def cancelled() -> bool:
-            return is_run_cancelled(run_id) or await request.is_disconnected()
+            def blog(message: str, *, level: str = "info"):
+                if batch_id:
+                    return emit(
+                        {
+                            "ada_event": "tool_build_log",
+                            "run_id": run_id,
+                            "message": message,
+                            "level": level,
+                        }
+                    )
+                if not run_id:
+                    return ""
+                return tool_build_log(run_id, message, level=level)
 
-        yield step("pip_review", "Awaiting pip install approval", "done")
+            async def cancelled() -> bool:
+                return is_run_cancelled(run_id) or await request.is_disconnected()
 
-        async for event in stream_runtime_install(
-            run_id=run_id,
-            plan_id=plan_id,
-            tool_name=tool_name,
-            tool_code=pip_data["tool_code"],
-            test_code=pip_data["test_code"],
-            requirements=pip_data.get("requirements", []),
-            manifest=pip_data.get("manifest"),
-            ui_files=pip_data.get("ui_files"),
-            new_packages=pip_data.get("packages", []),
-            creator_model=creator_model,
-            litellm_url=LITELLM_URL,
-            litellm_headers=litellm_headers(),
-            step=step,
-            phase=phase,
-            blog=blog,
-            sse_data=emit,
-            cancelled=cancelled,
-            skip_pip=False,
-            reasoning_effort=reasoning_effort,
-            install_lock=RUNTIME_INSTALL_LOCK if batch_id else None,
-        ):
-            yield event
+            yield step("pip_review", "Awaiting pip install approval", "done")
 
-        PENDING_PIP_INSTALLS.pop(pip_id, None)
-        if plan_id in PENDING_PLANS:
-            del PENDING_PLANS[plan_id]
+            async for event in stream_runtime_install(
+                run_id=run_id,
+                plan_id=plan_id,
+                tool_name=tool_name,
+                tool_code=pip_data["tool_code"],
+                test_code=pip_data["test_code"],
+                requirements=pip_data.get("requirements", []),
+                manifest=pip_data.get("manifest"),
+                ui_files=pip_data.get("ui_files"),
+                new_packages=pip_data.get("packages", []),
+                creator_model=creator_model,
+                litellm_url=LITELLM_URL,
+                litellm_headers=litellm_headers(),
+                step=step,
+                phase=phase,
+                blog=blog,
+                sse_data=emit,
+                cancelled=cancelled,
+                skip_pip=False,
+                reasoning_effort=reasoning_effort,
+                install_lock=RUNTIME_INSTALL_LOCK if batch_id else None,
+            ):
+                yield event
 
-        if install_succeeded and batch_id:
-            message = f"Tool '{tool_name}' installed in the persistent tool runtime."
-            mark_batch_tool_installed(batch_id, plan_id, tool_name, message)
-            complete = _maybe_emit_batch_complete(batch_id, run_id)
-            if complete:
-                yield complete
+            PENDING_PIP_INSTALLS.pop(pip_id, None)
+            if plan_id in PENDING_PLANS:
+                del PENDING_PLANS[plan_id]
 
-        clear_run_cancelled(run_id)
+            if install_succeeded and batch_id:
+                message = f"Tool '{tool_name}' installed in the persistent tool runtime."
+                mark_batch_tool_installed(batch_id, plan_id, tool_name, message)
+                complete = _maybe_emit_batch_complete(batch_id, run_id)
+                if complete:
+                    yield complete
+
+            clear_run_cancelled(run_id)
 
     return StreamingResponse(pip_stream(), media_type="text/event-stream", headers=SSE_HEADERS)
 
@@ -1825,115 +1945,117 @@ async def approve_preview(request: Request, payload: dict = Body(...)) -> Stream
         payload.get("reasoning_effort") or preview_data.get("reasoning_effort"),
         default=TOOL_CREATOR_REASONING_EFFORT,
     )
+    forge_search = resolve_gemini_google_search(payload, creator_model)
 
     async def preview_approve_stream():
-        clear_run_cancelled(run_id)
-        install_succeeded = False
-        build_failed = False
-        fail_reason = ""
+        with forge_google_search_context(forge_search):
+            clear_run_cancelled(run_id)
+            install_succeeded = False
+            build_failed = False
+            fail_reason = ""
 
-        def step(step_id: str, label: str, status: str, *, detail: str = ""):
-            if not run_id:
-                return ""
-            return process_step(
-                run_id,
-                step_id,
-                label,
-                status,
-                model=creator_model,
-                detail=detail,
-            )
-
-        def emit(payload: dict) -> str:
-            nonlocal install_succeeded, build_failed, fail_reason
-            event = payload.get("ada_event")
-            if event == "tool_installed":
-                install_succeeded = True
-            elif event == "tool_build_failed":
-                build_failed = True
-                fail_reason = payload.get("reason", "Build failed.")
-            return sse_data(
-                _batch_tag_payload(
-                    payload,
-                    batch_id=batch_id,
-                    plan_id=plan_id,
-                    tool_name=tool_name,
+            def step(step_id: str, label: str, status: str, *, detail: str = ""):
+                if not run_id:
+                    return ""
+                return process_step(
+                    run_id,
+                    step_id,
+                    label,
+                    status,
+                    model=creator_model,
+                    detail=detail,
                 )
-            )
 
-        def phase(step_id: str, status: str, *, detail: str = ""):
+            def emit(payload: dict) -> str:
+                nonlocal install_succeeded, build_failed, fail_reason
+                event = payload.get("ada_event")
+                if event == "tool_installed":
+                    install_succeeded = True
+                elif event == "tool_build_failed":
+                    build_failed = True
+                    fail_reason = payload.get("reason", "Build failed.")
+                return sse_data(
+                    _batch_tag_payload(
+                        payload,
+                        batch_id=batch_id,
+                        plan_id=plan_id,
+                        tool_name=tool_name,
+                    )
+                )
+
+            def phase(step_id: str, status: str, *, detail: str = ""):
+                if batch_id:
+                    return emit(
+                        {
+                            "ada_event": "tool_build_phase",
+                            "run_id": run_id,
+                            "phase": step_id,
+                            "status": status,
+                            "detail": detail,
+                        }
+                    )
+                if not run_id:
+                    return ""
+                return tool_build_phase(run_id, step_id, status, detail=detail)
+
+            def blog(message: str, *, level: str = "info"):
+                if batch_id:
+                    return emit(
+                        {
+                            "ada_event": "tool_build_log",
+                            "run_id": run_id,
+                            "message": message,
+                            "level": level,
+                        }
+                    )
+                if not run_id:
+                    return ""
+                return tool_build_log(run_id, message, level=level)
+
+            async def cancelled() -> bool:
+                return is_run_cancelled(run_id) or await request.is_disconnected()
+
+            yield step("ui_preview", "Awaiting app preview approval", "done")
+
+            async for event in continue_tool_build(
+                run_id=run_id,
+                plan_id=plan_id,
+                tool_name=tool_name,
+                tool_code=preview_data["tool_code"],
+                test_code=preview_data["test_code"],
+                requirements=preview_data.get("requirements", []),
+                manifest=preview_data.get("manifest"),
+                ui_files=preview_data.get("ui_files"),
+                creator_model=creator_model,
+                litellm_url=LITELLM_URL,
+                litellm_headers=litellm_headers(),
+                step=step,
+                phase=phase,
+                blog=blog,
+                sse_data=emit,
+                cancelled=cancelled,
+                reasoning_effort=reasoning_effort,
+                preview_already_installed=bool(preview_data.get("preview_installed")),
+                install_lock=RUNTIME_INSTALL_LOCK if batch_id else None,
+                batch_id=batch_id or None,
+            ):
+                yield event
+
+            PENDING_UI_PREVIEWS.pop(preview_id, None)
+            if plan_id in PENDING_PLANS:
+                del PENDING_PLANS[plan_id]
+
             if batch_id:
-                return emit(
-                    {
-                        "ada_event": "tool_build_phase",
-                        "run_id": run_id,
-                        "phase": step_id,
-                        "status": status,
-                        "detail": detail,
-                    }
-                )
-            if not run_id:
-                return ""
-            return tool_build_phase(run_id, step_id, status, detail=detail)
+                if install_succeeded:
+                    message = f"Tool '{tool_name}' installed in the persistent tool runtime."
+                    mark_batch_tool_installed(batch_id, plan_id, tool_name, message)
+                elif build_failed:
+                    mark_batch_tool_failed(batch_id, plan_id, tool_name, fail_reason)
+                complete = _maybe_emit_batch_complete(batch_id, run_id)
+                if complete:
+                    yield complete
 
-        def blog(message: str, *, level: str = "info"):
-            if batch_id:
-                return emit(
-                    {
-                        "ada_event": "tool_build_log",
-                        "run_id": run_id,
-                        "message": message,
-                        "level": level,
-                    }
-                )
-            if not run_id:
-                return ""
-            return tool_build_log(run_id, message, level=level)
-
-        async def cancelled() -> bool:
-            return is_run_cancelled(run_id) or await request.is_disconnected()
-
-        yield step("ui_preview", "Awaiting app preview approval", "done")
-
-        async for event in continue_tool_build(
-            run_id=run_id,
-            plan_id=plan_id,
-            tool_name=tool_name,
-            tool_code=preview_data["tool_code"],
-            test_code=preview_data["test_code"],
-            requirements=preview_data.get("requirements", []),
-            manifest=preview_data.get("manifest"),
-            ui_files=preview_data.get("ui_files"),
-            creator_model=creator_model,
-            litellm_url=LITELLM_URL,
-            litellm_headers=litellm_headers(),
-            step=step,
-            phase=phase,
-            blog=blog,
-            sse_data=emit,
-            cancelled=cancelled,
-            reasoning_effort=reasoning_effort,
-            preview_already_installed=bool(preview_data.get("preview_installed")),
-            install_lock=RUNTIME_INSTALL_LOCK if batch_id else None,
-            batch_id=batch_id or None,
-        ):
-            yield event
-
-        PENDING_UI_PREVIEWS.pop(preview_id, None)
-        if plan_id in PENDING_PLANS:
-            del PENDING_PLANS[plan_id]
-
-        if batch_id:
-            if install_succeeded:
-                message = f"Tool '{tool_name}' installed in the persistent tool runtime."
-                mark_batch_tool_installed(batch_id, plan_id, tool_name, message)
-            elif build_failed:
-                mark_batch_tool_failed(batch_id, plan_id, tool_name, fail_reason)
-            complete = _maybe_emit_batch_complete(batch_id, run_id)
-            if complete:
-                yield complete
-
-        clear_run_cancelled(run_id)
+            clear_run_cancelled(run_id)
 
     return StreamingResponse(
         preview_approve_stream(), media_type="text/event-stream", headers=SSE_HEADERS
@@ -1970,6 +2092,7 @@ async def revise_preview(request: Request, payload: dict = Body(...)) -> Streami
         payload.get("reasoning_effort") or preview_data.get("reasoning_effort"),
         default=TOOL_CREATOR_REASONING_EFFORT,
     )
+    forge_search = resolve_gemini_google_search(payload, creator_model)
 
     async def preview_revise_stream():
         clear_run_cancelled(run_id)
@@ -2028,20 +2151,21 @@ async def revise_preview(request: Request, payload: dict = Body(...)) -> Streami
             yield blog("No screenshot attached — revising from text feedback only.", level="warn")
 
         try:
-            tool_code, test_code, manifest, ui_files = await revise_preview_code(
-                tool_name,
-                preview_data["tool_code"],
-                preview_data["test_code"],
-                preview_data.get("manifest"),
-                feedback,
-                creator_model,
-                litellm_url=LITELLM_URL,
-                headers=litellm_headers(),
-                run_id=run_id,
-                reasoning_effort=reasoning_effort,
-                screenshot_base64=screenshot_b64,
-                ui_files=preview_data.get("ui_files"),
-            )
+            with forge_google_search_context(forge_search):
+                tool_code, test_code, manifest, ui_files = await revise_preview_code(
+                    tool_name,
+                    preview_data["tool_code"],
+                    preview_data["test_code"],
+                    preview_data.get("manifest"),
+                    feedback,
+                    creator_model,
+                    litellm_url=LITELLM_URL,
+                    headers=litellm_headers(),
+                    run_id=run_id,
+                    reasoning_effort=reasoning_effort,
+                    screenshot_base64=screenshot_b64,
+                    ui_files=preview_data.get("ui_files"),
+                )
         except Exception as exc:
             yield step("ui_preview", "Revising app from your feedback", "error", detail=str(exc))
             yield phase("ui_preview", "error", detail=str(exc)[:200])
@@ -2067,25 +2191,26 @@ async def revise_preview(request: Request, payload: dict = Body(...)) -> Streami
             }
         )
 
-        sandbox_success, log_output, test_code, tool_code, sandbox_notices = (
-            await run_sandbox_phase(
-                run_id=run_id,
-                tool_name=tool_name,
-                tool_code=tool_code,
-                test_code=test_code,
-                requirements=preview_data.get("requirements", []),
-                manifest=manifest,
-                creator_model=creator_model,
-                litellm_url=LITELLM_URL,
-                headers=litellm_headers(),
-                step=step,
-                phase=phase,
-                blog=blog,
-                sse_data=sse_data,
-                cancelled=cancelled,
-                reasoning_effort=reasoning_effort,
+        with forge_google_search_context(forge_search):
+            sandbox_success, log_output, test_code, tool_code, sandbox_notices = (
+                await run_sandbox_phase(
+                    run_id=run_id,
+                    tool_name=tool_name,
+                    tool_code=tool_code,
+                    test_code=test_code,
+                    requirements=preview_data.get("requirements", []),
+                    manifest=manifest,
+                    creator_model=creator_model,
+                    litellm_url=LITELLM_URL,
+                    headers=litellm_headers(),
+                    step=step,
+                    phase=phase,
+                    blog=blog,
+                    sse_data=sse_data,
+                    cancelled=cancelled,
+                    reasoning_effort=reasoning_effort,
+                )
             )
-        )
         for level, message in sandbox_notices:
             yield blog(message, level=level)
         log_sandbox(
@@ -2252,6 +2377,7 @@ async def revise_tool(request: Request, payload: dict = Body(...)) -> StreamingR
         payload.get("reasoning_effort"),
         default=TOOL_CREATOR_REASONING_EFFORT,
     )
+    forge_search = resolve_gemini_google_search(payload, creator_model)
 
     async def revision_stream():
         clear_run_cancelled(run_id)
@@ -2282,25 +2408,26 @@ async def revise_tool(request: Request, payload: dict = Body(...)) -> StreamingR
 
         try:
             plan_out: dict[str, str] = {}
-            async for event in stream_plan_draft_events(
-                run_id,
-                tool_name,
-                revise_tool_plan_stream(
+            with forge_google_search_context(forge_search):
+                async for event in stream_plan_draft_events(
+                    run_id,
                     tool_name,
-                    plan_data["description"],
-                    plan_data["plan"],
-                    feedback,
-                    creator_model,
-                    litellm_url=LITELLM_URL,
-                    headers=litellm_headers(),
-                    run_id=run_id,
-                    reasoning_effort=reasoning_effort,
-                ),
-                kind=plan_data.get("kind", "create"),
-                plan_id=plan_id,
-                out=plan_out,
-            ):
-                yield event
+                    revise_tool_plan_stream(
+                        tool_name,
+                        plan_data["description"],
+                        plan_data["plan"],
+                        feedback,
+                        creator_model,
+                        litellm_url=LITELLM_URL,
+                        headers=litellm_headers(),
+                        run_id=run_id,
+                        reasoning_effort=reasoning_effort,
+                    ),
+                    kind=plan_data.get("kind", "create"),
+                    plan_id=plan_id,
+                    out=plan_out,
+                ):
+                    yield event
             revised_plan = plan_out.get("plan", "")
             log_plan(run_id, tool_name=tool_name, plan=revised_plan, action="revised")
         except (RuntimeError, ValueError) as exc:

@@ -176,6 +176,7 @@ export function useChatStream() {
             model,
             tool_creator_model: store.toolCreatorModel,
             reasoning_effort: store.thinkingEffort,
+            gemini_google_search: store.geminiGoogleSearch,
             messages: buildMessages(),
             run_id: runId,
             stream: true,
@@ -208,6 +209,12 @@ export function useChatStream() {
               if (json.ada_event === 'forge_batch_proposed') {
                 batchReceived = true
                 handleForgeBatchProposed(json, assistantId)
+                return
+              }
+              if (json.ada_event === 'search_sources') {
+                store.updateAssistantMessage(assistantId, {
+                  searchSources: json.sources || [],
+                })
                 return
               }
             }

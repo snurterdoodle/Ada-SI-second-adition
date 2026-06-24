@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import {
   BUILD_STEPS,
   CHAT_MODEL_STORAGE_KEY,
+  GEMINI_GOOGLE_SEARCH_STORAGE_KEY,
   PROGRESSION_STORAGE_KEY,
   SECOND_MODEL_STORAGE_KEY,
   THINKING_EFFORT_STORAGE_KEY,
@@ -94,6 +95,7 @@ type AppState = {
   chatModel: string
   toolCreatorModel: string
   thinkingEffort: ReasoningEffort
+  geminiGoogleSearch: boolean
   prompts: PromptsConfig
   effectivePrompts: EffectivePrompts
   settingsOpen: boolean
@@ -124,6 +126,7 @@ type AppState = {
   setChatModel: (model: string) => void
   setToolCreatorModel: (model: string) => void
   setThinkingEffort: (effort: ReasoningEffort) => void
+  setGeminiGoogleSearch: (enabled: boolean) => void
   setPrompts: (prompts: PromptsConfig, effective: EffectivePrompts) => void
   setSettingsOpen: (open: boolean) => void
   setPromptsSaveState: (status: PromptsSaveState['status'], message?: string) => void
@@ -149,7 +152,9 @@ type AppState = {
   addAssistantMessage: () => string
   updateAssistantMessage: (
     id: string,
-    patch: Partial<Pick<AssistantFeedItem, 'reasoningText' | 'content' | 'streaming' | 'hidden'>>,
+    patch: Partial<
+      Pick<AssistantFeedItem, 'reasoningText' | 'content' | 'streaming' | 'hidden' | 'searchSources'>
+    >,
   ) => void
   removeFeedItem: (id: string) => void
   pushConversation: (message: { role: 'user' | 'assistant' | 'system'; content: string }) => void
@@ -208,6 +213,10 @@ type AppState = {
   ) => void
   findForgeBatchColumn: (planId: string) => ForgeBatchToolColumn | undefined
   showForgeBatchColumnSuccess: (planId: string, message: string) => void
+}
+
+function loadBooleanStorage(key: string): boolean {
+  return localStorage.getItem(key) === 'true'
 }
 
 function loadStorage(key: string): string {
@@ -285,6 +294,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   chatModel: loadStorage(CHAT_MODEL_STORAGE_KEY),
   toolCreatorModel: loadStorage(SECOND_MODEL_STORAGE_KEY),
   thinkingEffort: normalizeReasoningEffort(loadStorage(THINKING_EFFORT_STORAGE_KEY)),
+  geminiGoogleSearch: loadBooleanStorage(GEMINI_GOOGLE_SEARCH_STORAGE_KEY),
   prompts: EMPTY_PROMPTS,
   effectivePrompts: createEmptyEffectivePrompts(),
   settingsOpen: false,
@@ -323,6 +333,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   setThinkingEffort: (effort) => {
     localStorage.setItem(THINKING_EFFORT_STORAGE_KEY, effort)
     set({ thinkingEffort: effort })
+  },
+  setGeminiGoogleSearch: (enabled) => {
+    localStorage.setItem(GEMINI_GOOGLE_SEARCH_STORAGE_KEY, enabled ? 'true' : 'false')
+    set({ geminiGoogleSearch: enabled })
   },
   setPrompts: (prompts, effective) => set({ prompts, effectivePrompts: effective }),
   setSettingsOpen: (open) => set({ settingsOpen: open }),

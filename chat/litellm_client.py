@@ -16,6 +16,94 @@ def is_gemini_model(model: str) -> bool:
     return model.startswith("gemini/") or model.startswith("gemini/*")
 
 
+def merge_search_sources(
+    acc: dict[str, dict[str, str]],
+    sources: list[dict[str, str]],
+) -> dict[str, dict[str, str]]:
+    for src in sources:
+        url = (src.get("url") or "").strip()
+        if not url.startswith("http"):
+            continue
+        title = (src.get("title") or "").strip() or url
+        acc[url] = {"title": title, "url": url}
+    return acc
+
+
+def _add_web_source(out: list[dict[str, str]], seen: set[str], web: Any) -> None:
+    if not isinstance(web, dict):
+        return
+    url = (web.get("uri") or web.get("url") or "").strip()
+    if not url.startswith("http") or url in seen:
+        return
+    seen.add(url)
+    title = (web.get("title") or "").strip() or url
+    out.append({"title": title, "url": url})
+
+
+def _walk_for_search_sources(obj: Any, out: list[dict[str, str]], seen: set[str]) -> None:
+    if isinstance(obj, dict):
+        web = obj.get("web")
+        if isinstance(web, dict):
+            _add_web_source(out, seen, web)
+        uri = obj.get("uri") or obj.get("url")
+        if uri and (obj.get("title") or obj.get("uri")):
+            _add_web_source(out, seen, obj)
+
+        for key in ("groundingChunks", "grounding_chunks", "chunks"):
+            chunks = obj.get(key)
+            if isinstance(chunks, list):
+                for entry in chunks:
+                    _walk_for_search_sources(entry, out, seen)
+
+        for key in ("server_side_tool_invocations", "search_results", "results"):
+            entries = obj.get(key)
+            if isinstance(entries, list):
+                for entry in entries:
+                    _walk_for_search_sources(entry, out, seen)
+
+        response = obj.get("response")
+        if response is not None:
+            _walk_for_search_sources(response, out, seen)
+
+        for key in (
+            "groundingMetadata",
+            "grounding_metadata",
+            "vertex_ai_grounding_metadata",
+            "provider_specific_fields",
+        ):
+            nested = obj.get(key)
+            if nested is not None:
+                _walk_for_search_sources(nested, out, seen)
+    elif isinstance(obj, list):
+        for item in obj:
+            _walk_for_search_sources(item, out, seen)
+
+
+def extract_search_sources_from_chunk(chunk: dict) -> list[dict[str, str]]:
+    """Extract deduped web sources from a LiteLLM/Gemini streaming chunk."""
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    _walk_for_search_sources(chunk, out, seen)
+
+    choices = chunk.get("choices") or []
+    if choices:
+        choice = choices[0]
+        _walk_for_search_sources(choice, out, seen)
+        _walk_for_search_sources(choice.get("delta"), out, seen)
+        _walk_for_search_sources(choice.get("message"), out, seen)
+
+    return out
+
+
+def extract_search_sources_from_message(message: dict | None) -> list[dict[str, str]]:
+    if not message:
+        return []
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    _walk_for_search_sources(message, out, seen)
+    return out
+
+
 def build_completion_payload(
     model: str,
     messages: list[dict],
@@ -24,6 +112,7 @@ def build_completion_payload(
     tools: list[dict] | None = None,
     temperature: float = 0.2,
     reasoning_effort: str | None = None,
+    gemini_google_search: bool = False,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "model": model,
@@ -31,8 +120,17 @@ def build_completion_payload(
         "stream": stream,
         "temperature": temperature,
     }
-    if tools is not None:
-        payload["tools"] = tools
+    effective_tools = list(tools) if tools is not None else None
+    if gemini_google_search and is_gemini_model(model):
+        effective_tools = list(effective_tools or [])
+        if not any(
+            isinstance(t, dict) and ("googleSearch" in t or "google_search" in t)
+            for t in effective_tools
+        ):
+            effective_tools.append({"googleSearch": {}})
+        payload["include_server_side_tool_invocations"] = True
+    if effective_tools is not None:
+        payload["tools"] = effective_tools
         payload["tool_choice"] = "auto"
     effort = reasoning_effort
     if effort in ("off", "none"):
@@ -243,6 +341,7 @@ async def stream_chat_completion(
     tools: list[dict] | None = None,
     temperature: float = 0.2,
     reasoning_effort: str | None = None,
+    gemini_google_search: bool = False,
 ) -> AsyncIterator[dict]:
     payload = build_completion_payload(
         model,
@@ -251,6 +350,7 @@ async def stream_chat_completion(
         tools=tools,
         temperature=temperature,
         reasoning_effort=reasoning_effort,
+        gemini_google_search=gemini_google_search,
     )
     async with httpx.AsyncClient(timeout=120.0) as client:
         async with client.stream(
@@ -286,6 +386,7 @@ async def stream_completion_deltas(
     tools: list[dict] | None = None,
     temperature: float = 0.2,
     reasoning_effort: str | None = None,
+    gemini_google_search: bool = False,
 ) -> AsyncIterator[tuple[str, str]]:
     """Yield (kind, text) where kind is 'reasoning' or 'content'."""
     think_parser = ThinkStreamParser()
@@ -297,6 +398,7 @@ async def stream_completion_deltas(
         tools=tools,
         temperature=temperature,
         reasoning_effort=reasoning_effort,
+        gemini_google_search=gemini_google_search,
     ):
         delta = extract_stream_delta(chunk, think_parser=think_parser)
         if delta["reasoning"]:

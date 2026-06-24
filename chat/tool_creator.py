@@ -4,10 +4,12 @@ import binascii
 import json
 import re
 from collections.abc import AsyncIterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 import httpx
 
-from litellm_client import build_completion_payload, stream_completion_deltas
+from litellm_client import build_completion_payload, is_gemini_model, stream_completion_deltas
 from debug_log import log_block, log_debug, log_generated_code, log_plan, log_stream_delta
 from forge_routing import infer_codegen_profile, infer_revise_profile
 from prompts_config import (
@@ -27,6 +29,24 @@ from prompts_config import (
 from tools_engine import validate_manifest, validate_tool_module, validate_ui_files
 
 MAX_PREVIEW_SCREENSHOT_BYTES = 2 * 1024 * 1024
+
+_forge_gemini_google_search: ContextVar[bool] = ContextVar(
+    "forge_gemini_google_search", default=False
+)
+
+
+@contextmanager
+def forge_google_search_context(enabled: bool):
+    """Enable Gemini Google Search for Forge LLM calls in this context."""
+    token = _forge_gemini_google_search.set(enabled)
+    try:
+        yield
+    finally:
+        _forge_gemini_google_search.reset(token)
+
+
+def _effective_forge_google_search(model: str) -> bool:
+    return _forge_gemini_google_search.get() and is_gemini_model(model)
 
 
 def normalize_preview_screenshot(raw: str | None) -> str | None:
@@ -110,6 +130,7 @@ async def _litellm_chat(
         stream=False,
         temperature=temperature,
         reasoning_effort=reasoning_effort,
+        gemini_google_search=_effective_forge_google_search(model),
     )
     async with httpx.AsyncClient(timeout=120.0) as client:
         response = await client.post(
@@ -142,6 +163,7 @@ async def _litellm_stream(
         messages,
         temperature=temperature,
         reasoning_effort=reasoning_effort,
+        gemini_google_search=_effective_forge_google_search(model),
     ):
         yield kind, text
 

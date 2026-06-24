@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { AssistantFeedItem } from '../../types/events'
 import { Markdown } from './Markdown'
 import { ReasoningBlock } from './ReasoningBlock'
+import { SearchSources } from './SearchSources'
 
 type MessageRowProps = {
   item: AssistantFeedItem | { type: 'user'; content: string }
@@ -21,6 +22,7 @@ export function MessageRow({ item }: MessageRowProps) {
 
   const hasReasoning = Boolean(item.reasoningText)
   const hasContent = Boolean(item.content)
+  const hasSources = Boolean(item.searchSources?.length)
   const showThinking =
     hasReasoning || (item.streaming && !hasContent)
 
@@ -55,6 +57,9 @@ export function MessageRow({ item }: MessageRowProps) {
             <div className="message-content">
               <Markdown content={item.content} />
             </div>
+          )}
+          {hasSources && item.searchSources && (
+            <SearchSources sources={item.searchSources} />
           )}
         </div>
       </article>

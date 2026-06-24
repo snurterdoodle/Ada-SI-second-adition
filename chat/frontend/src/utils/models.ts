@@ -12,6 +12,10 @@ export function getModelLabel(modelId: string): string {
   return slash === -1 ? modelId : modelId.slice(slash + 1)
 }
 
+export function isGeminiModel(modelId: string): boolean {
+  return getProvider(modelId) === 'gemini'
+}
+
 export function groupModels(models: string[]): Map<string, string[]> {
   const grouped = new Map<string, string[]>()
   for (const model of models) {

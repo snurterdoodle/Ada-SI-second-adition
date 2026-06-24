@@ -1,6 +1,6 @@
 import { useAppStore } from '../../state/store'
 import { useAgentBootstrap } from '../../hooks/useAgentBootstrap'
-import { getModelLabel, groupModels } from '../../utils/models'
+import { getModelLabel, groupModels, isGeminiModel } from '../../utils/models'
 import { REASONING_EFFORT_OPTIONS, type ReasoningEffort } from '../../utils/reasoningEffort'
 
 export function AgentsSettings() {
@@ -8,13 +8,17 @@ export function AgentsSettings() {
   const chatModel = useAppStore((s) => s.chatModel)
   const toolCreatorModel = useAppStore((s) => s.toolCreatorModel)
   const thinkingEffort = useAppStore((s) => s.thinkingEffort)
+  const geminiGoogleSearch = useAppStore((s) => s.geminiGoogleSearch)
   const setChatModel = useAppStore((s) => s.setChatModel)
   const setToolCreatorModel = useAppStore((s) => s.setToolCreatorModel)
   const setThinkingEffort = useAppStore((s) => s.setThinkingEffort)
+  const setGeminiGoogleSearch = useAppStore((s) => s.setGeminiGoogleSearch)
   const { loadAgents } = useAgentBootstrap()
 
   const grouped = groupModels(models)
   const sortedProviders = [...grouped.keys()].sort((a, b) => a.localeCompare(b))
+  const scoutIsGemini = isGeminiModel(chatModel)
+  const searchAvailable = scoutIsGemini || isGeminiModel(toolCreatorModel)
 
   const renderModelSelect = (
     id: string,
@@ -92,6 +96,23 @@ export function AgentsSettings() {
               </option>
             ))}
           </select>
+        </div>
+        <div className="settings-field">
+          <label className="settings-checkbox-label" htmlFor="settings-gemini-google-search">
+            <input
+              id="settings-gemini-google-search"
+              type="checkbox"
+              checked={geminiGoogleSearch}
+              disabled={!searchAvailable}
+              onChange={(e) => setGeminiGoogleSearch(e.target.checked)}
+            />
+            Google Search grounding (Gemini)
+          </label>
+          <p className="forger-guidance-hint">
+            {searchAvailable
+              ? 'When enabled, Gemini models use built-in Google Search — Scout when Scout is Gemini, Forge when Forge master is Gemini.'
+              : 'Available when Scout or Forge master uses a Gemini model.'}
+          </p>
         </div>
       </div>
     </div>
