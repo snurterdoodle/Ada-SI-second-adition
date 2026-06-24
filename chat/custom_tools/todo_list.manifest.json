@@ -1,0 +1,22 @@
+{
+  "kind": "interactive",
+  "display_name": "To-Do List",
+  "icon": "list",
+  "operations": [
+    "list_tasks",
+    "add_task",
+    "update_task",
+    "delete_task"
+  ],
+  "ui": {
+    "template": "list",
+    "title_field": "title",
+    "done_field": "done",
+    "actions": {
+      "fetch": "list_tasks",
+      "create": "add_task",
+      "delete": "delete_task",
+      "toggle": "update_task"
+    }
+  }
+}
