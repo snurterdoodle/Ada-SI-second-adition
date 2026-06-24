@@ -264,12 +264,46 @@ else:
     return _run_in_venv(run_script, str(file), json.dumps(arguments))
 
 
+def rewrite_workspace_paths(text: str, workspace_dir: Path) -> str:
+    """Rewrite /workspace/ filesystem paths in generated test_code.
+
+    Forge tests load tools from /workspace/{name}.py and touch /workspace/skill_data/.
+    The ephemeral sandbox rewrites those paths; the persistent runtime must do the same
+    when TOOLS_DIR is not mounted at /workspace (e.g. Windows local dev).
+    """
+    prefix = workspace_dir.resolve().as_posix()
+    if not prefix.endswith("/"):
+        prefix += "/"
+
+    def _sub(match: re.Match[str]) -> str:
+        path = match.group("path")
+        return f'{match.group("q")}{prefix}{path}{match.group("q")}'
+
+    text = re.sub(
+        r'(?P<q>["\'])/workspace/(?P<path>[^"\']+\.py)(?P=q)',
+        _sub,
+        text,
+    )
+    text = re.sub(
+        r'(?P<q>["\'])/workspace/skill_data/(?P<path>[^"\']+)(?P=q)',
+        _sub,
+        text,
+    )
+    text = re.sub(
+        r'Path\(\s*(?P<q>["\'])/workspace/(?P<path>[^"\']+)(?P=q)\s*\)',
+        lambda m: f'Path({m.group("q")}{prefix}{m.group("path")}{m.group("q")})',
+        text,
+    )
+    return text
+
+
 def verify_tool_in_runtime(tool_name: str, test_code: str) -> tuple[bool, str]:
     ensure_venv()
     py = venv_python()
     test_path = TOOLS_DIR / f".verify_{tool_name}_test_run.py"
+    rewritten = rewrite_workspace_paths(test_code, TOOLS_DIR)
     try:
-        test_path.write_text(test_code, encoding="utf-8")
+        test_path.write_text(rewritten, encoding="utf-8")
         proc = subprocess.run(
             [str(py), str(test_path)],
             cwd=str(TOOLS_DIR),

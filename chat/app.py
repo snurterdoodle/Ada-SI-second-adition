@@ -18,6 +18,7 @@ from prompts_config import (
     reset_prompts_config,
     save_prompts_config,
 )
+from build_ui_qa import stream_interactive_ui_qa
 from build_pipeline import (
     PENDING_PIP_INSTALLS,
     PENDING_UI_PREVIEWS,
@@ -62,7 +63,6 @@ from runtime_client import (
     runtime_uninstall_pip_package,
     set_runtime_url,
 )
-from sandbox import check_docker_available, verify_tool_in_sandbox
 from tool_creator import (
     draft_tool_edit_plan_stream,
     draft_tool_plan_stream,
@@ -80,6 +80,7 @@ from tools_engine import (
     alist_tool_summaries,
     delete_tool_async,
     execute_dynamic_tool,
+    execute_skill_action,
     get_package_usage,
     is_interactive_skill,
     prepare_agent_messages,
@@ -88,9 +89,13 @@ from tools_engine import (
     read_tool_manifest,
     read_tool_requirements,
     read_tool_test,
+    resolve_skill_ui_file,
+    skill_ui_entry_path,
     tool_exists,
+    ui_content_type,
     validate_tool_schema,
     validate_manifest,
+    validate_ui_files,
     write_skill_data,
     write_tool_files,
 )
@@ -132,16 +137,14 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 @app.on_event("startup")
 async def startup_check() -> None:
     set_runtime_url(TOOL_RUNTIME_URL)
-    available, reason = check_docker_available()
-    if available:
-        logger.info("Docker sandbox is available.")
-    else:
-        logger.warning("Docker sandbox unavailable: %s", reason)
     runtime_ok, runtime_reason = await runtime_health()
     if runtime_ok:
         logger.info("Tool runtime is available at %s.", TOOL_RUNTIME_URL)
     else:
         logger.warning("Tool runtime unavailable: %s", runtime_reason)
+
+    load_prompts_config(refresh=True)
+    logger.info("Prompts config loaded from staging.")
 
 
 def litellm_headers() -> dict[str, str]:
@@ -846,15 +849,12 @@ async def index() -> FileResponse:
 
 @app.get("/api/config")
 async def get_config() -> dict:
-    docker_ok, docker_message = check_docker_available()
     return {
         "lite_model": LITE_MODEL,
         "tool_creator_model": TOOL_CREATOR_MODEL,
         "chat_model": LITE_MODEL,
         "second_model": TOOL_CREATOR_MODEL,
         "tools": await alist_tool_summaries(),
-        "docker_available": docker_ok,
-        "docker_message": docker_message if not docker_ok else "",
         "tool_runtime_available": (await runtime_health())[0],
         "tool_runtime_url": TOOL_RUNTIME_URL,
         "lite_model_reasoning_effort": LITE_MODEL_REASONING_EFFORT or "low",
@@ -940,6 +940,64 @@ async def remove_tool(tool_name: str) -> dict:
     return {"status": "deleted", "tool_name": tool_name}
 
 
+SKILL_UI_CSP = (
+    "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+    "style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'"
+)
+
+
+@app.get("/api/skills/{skill_name}/ui")
+async def get_skill_ui_entry(skill_name: str) -> FileResponse:
+    if not tool_exists(skill_name):
+        raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found.")
+    if not is_interactive_skill(skill_name):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Skill '{skill_name}' is not an interactive skill.",
+        )
+    entry = skill_ui_entry_path(skill_name)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Custom UI entry not found.")
+    return FileResponse(
+        entry,
+        media_type=ui_content_type(entry),
+        headers={"Content-Security-Policy": SKILL_UI_CSP},
+    )
+
+
+@app.get("/api/skills/{skill_name}/ui/{file_path:path}")
+async def get_skill_ui_file(skill_name: str, file_path: str) -> FileResponse:
+    if not tool_exists(skill_name):
+        raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found.")
+    if not is_interactive_skill(skill_name):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Skill '{skill_name}' is not an interactive skill.",
+        )
+    resolved = resolve_skill_ui_file(skill_name, file_path)
+    if resolved is None:
+        raise HTTPException(status_code=404, detail="UI file not found.")
+    return FileResponse(
+        resolved,
+        media_type=ui_content_type(resolved),
+        headers={"Content-Security-Policy": SKILL_UI_CSP},
+    )
+
+
+@app.post("/api/skills/{skill_name}/action")
+async def post_skill_action(skill_name: str, payload: dict = Body(...)) -> dict:
+    if not tool_exists(skill_name):
+        raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found.")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Request body must be a JSON object.")
+    try:
+        return await execute_skill_action(skill_name, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"ok": False, "error": str(exc)}) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail={"ok": False, "error": str(exc)}) from exc
+
+
 @app.get("/api/skills/{skill_name}/data")
 async def get_skill_data(skill_name: str) -> dict:
     if not tool_exists(skill_name):
@@ -964,13 +1022,13 @@ async def put_skill_data(skill_name: str, payload: dict = Body(...)) -> dict:
             status_code=400,
             detail=f"Skill '{skill_name}' is not an interactive skill.",
         )
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="Request body must be a JSON object.")
-    try:
-        write_skill_data(skill_name, payload)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return payload
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "Direct skill data writes are disabled. "
+            f"Use POST /api/skills/{skill_name}/action instead."
+        ),
+    )
 
 
 def _attach_package_usage(packages: list[dict]) -> list[dict]:
@@ -1177,10 +1235,6 @@ async def approve_tool(request: Request, payload: dict = Body(...)) -> Streaming
         default=TOOL_CREATOR_REASONING_EFFORT,
     )
 
-    docker_ok, docker_message = check_docker_available()
-    if not docker_ok:
-        raise HTTPException(status_code=503, detail=docker_message)
-
     async def approval_stream():
         clear_run_cancelled(run_id)
         log_build_event(
@@ -1268,13 +1322,18 @@ async def approve_tool(request: Request, payload: dict = Body(...)) -> Streaming
             test_code = ""
             requirements: list[str] = []
             manifest: dict | None = None
+            ui_files: dict[str, str] | None = None
             parse_error: Exception | None = None
             for parse_attempt in range(PHASE_MAX_RETRIES):
                 try:
                     if parse_attempt == 0:
-                        tool_code, test_code, requirements, manifest = parse_generated_tool_response(
-                            accumulated
-                        )
+                        (
+                            tool_code,
+                            test_code,
+                            requirements,
+                            manifest,
+                            ui_files,
+                        ) = parse_generated_tool_response(accumulated)
                     break
                 except Exception as exc:
                     parse_error = exc
@@ -1288,6 +1347,7 @@ async def approve_tool(request: Request, payload: dict = Body(...)) -> Streaming
                             test_code,
                             requirements,
                             manifest,
+                            ui_files,
                         ) = await repair_generated_tool_response(
                             plan_data["plan"],
                             tool_name,
@@ -1307,6 +1367,9 @@ async def approve_tool(request: Request, payload: dict = Body(...)) -> Streaming
                 manifest_ok, manifest_reason = validate_manifest(manifest, tool_name)
                 if not manifest_ok:
                     raise ValueError(f"Invalid manifest: {manifest_reason}")
+                ui_ok, ui_reason = validate_ui_files(ui_files, manifest, tool_name)
+                if not ui_ok:
+                    raise ValueError(f"Invalid ui_files: {ui_reason}")
 
             log_generated_code(
                 run_id,
@@ -1436,9 +1499,9 @@ async def approve_tool(request: Request, payload: dict = Body(...)) -> Streaming
                 yield event
             return
 
-        yield step("sandbox_test", "Running sandbox tests", "active")
+        yield step("sandbox_test", "Running verification tests", "active")
         yield phase("sandbox_test", "active")
-        yield blog("Running sandbox tests in isolated container (no network)…")
+        yield blog("Running verification tests in isolated venv…")
 
         sandbox_success, log_output, test_code, tool_code, sandbox_notices = (
             await run_sandbox_phase(
@@ -1446,6 +1509,7 @@ async def approve_tool(request: Request, payload: dict = Body(...)) -> Streaming
             tool_name=tool_name,
             tool_code=tool_code,
             test_code=test_code,
+            requirements=requirements,
             manifest=manifest,
             creator_model=creator_model,
             litellm_url=LITELLM_URL,
@@ -1471,7 +1535,7 @@ async def approve_tool(request: Request, payload: dict = Body(...)) -> Streaming
         if not sandbox_success:
             yield step(
                 "sandbox_test",
-                "Running sandbox tests",
+                "Running verification tests",
                 "error",
                 detail=log_output[:500],
             )
@@ -1482,16 +1546,55 @@ async def approve_tool(request: Request, payload: dict = Body(...)) -> Streaming
                     "ada_event": "tool_build_failed",
                     "run_id": run_id,
                     "tool_name": tool_name,
-                    "reason": "Sandbox verification tests failed.",
+                    "reason": "Verification tests failed.",
                     "logs": log_output,
                 }
             )
             yield "data: [DONE]\n\n"
             return
 
-        yield step("sandbox_test", "Running sandbox tests", "done")
+        yield step("sandbox_test", "Running verification tests", "done")
         yield phase("sandbox_test", "done")
-        yield blog("Sandbox tests passed.")
+        yield blog("Verification tests passed.")
+
+        qa_passed = False
+        async for event, done, new_tool, new_test, new_manifest, new_ui in stream_interactive_ui_qa(
+            run_id=run_id,
+            tool_name=tool_name,
+            tool_code=tool_code,
+            test_code=test_code,
+            manifest=manifest,
+            ui_files=ui_files,
+            creator_model=creator_model,
+            litellm_url=LITELLM_URL,
+            headers=litellm_headers(),
+            reasoning_effort=reasoning_effort,
+            step=step,
+            phase=phase,
+            blog=blog,
+            cancelled=cancelled,
+        ):
+            if event:
+                yield event
+            if done:
+                qa_passed = True
+                tool_code = new_tool
+                test_code = new_test
+                manifest = new_manifest
+                ui_files = new_ui
+                break
+
+        if not qa_passed:
+            yield sse_data(
+                {
+                    "ada_event": "tool_build_failed",
+                    "run_id": run_id,
+                    "tool_name": tool_name,
+                    "reason": "Interactive app QA failed.",
+                }
+            )
+            yield "data: [DONE]\n\n"
+            return
 
         preview_paused, preview_events = await maybe_pause_for_ui_preview(
             run_id=run_id,
@@ -1501,6 +1604,7 @@ async def approve_tool(request: Request, payload: dict = Body(...)) -> Streaming
             test_code=test_code,
             requirements=requirements,
             manifest=manifest,
+            ui_files=ui_files,
             creator_model=creator_model,
             step=step,
             phase=phase,
@@ -1521,6 +1625,7 @@ async def approve_tool(request: Request, payload: dict = Body(...)) -> Streaming
             test_code=test_code,
             requirements=requirements,
             manifest=manifest,
+            ui_files=ui_files,
             creator_model=creator_model,
             litellm_url=LITELLM_URL,
             litellm_headers=litellm_headers(),
@@ -1605,6 +1710,7 @@ async def approve_pip(request: Request, payload: dict = Body(...)) -> StreamingR
             test_code=pip_data["test_code"],
             requirements=pip_data.get("requirements", []),
             manifest=pip_data.get("manifest"),
+            ui_files=pip_data.get("ui_files"),
             new_packages=pip_data.get("packages", []),
             creator_model=creator_model,
             litellm_url=LITELLM_URL,
@@ -1690,6 +1796,7 @@ async def approve_preview(request: Request, payload: dict = Body(...)) -> Stream
             test_code=preview_data["test_code"],
             requirements=preview_data.get("requirements", []),
             manifest=preview_data.get("manifest"),
+            ui_files=preview_data.get("ui_files"),
             creator_model=creator_model,
             litellm_url=LITELLM_URL,
             litellm_headers=litellm_headers(),
@@ -1801,7 +1908,7 @@ async def revise_preview(request: Request, payload: dict = Body(...)) -> Streami
             yield blog("No screenshot attached — revising from text feedback only.", level="warn")
 
         try:
-            tool_code, test_code, manifest = await revise_preview_code(
+            tool_code, test_code, manifest, ui_files = await revise_preview_code(
                 tool_name,
                 preview_data["tool_code"],
                 preview_data["test_code"],
@@ -1813,6 +1920,7 @@ async def revise_preview(request: Request, payload: dict = Body(...)) -> Streami
                 run_id=run_id,
                 reasoning_effort=reasoning_effort,
                 screenshot_base64=screenshot_b64,
+                ui_files=preview_data.get("ui_files"),
             )
         except Exception as exc:
             yield step("ui_preview", "Revising app from your feedback", "error", detail=str(exc))
@@ -1845,6 +1953,7 @@ async def revise_preview(request: Request, payload: dict = Body(...)) -> Streami
                 tool_name=tool_name,
                 tool_code=tool_code,
                 test_code=test_code,
+                requirements=preview_data.get("requirements", []),
                 manifest=manifest,
                 creator_model=creator_model,
                 litellm_url=LITELLM_URL,
@@ -1868,7 +1977,7 @@ async def revise_preview(request: Request, payload: dict = Body(...)) -> Streami
         )
 
         if not sandbox_success:
-            yield step("sandbox_test", "Running sandbox tests", "error", detail=log_output[:500])
+            yield step("sandbox_test", "Running verification tests", "error", detail=log_output[:500])
             yield phase("sandbox_test", "error", detail=log_output[:200])
             yield blog(log_output, level="error")
             yield sse_data(
@@ -1876,7 +1985,7 @@ async def revise_preview(request: Request, payload: dict = Body(...)) -> Streami
                     "ada_event": "tool_build_failed",
                     "run_id": run_id,
                     "tool_name": tool_name,
-                    "reason": "Sandbox verification failed after preview revision.",
+                    "reason": "Verification failed after preview revision.",
                     "logs": log_output,
                 }
             )
@@ -1886,6 +1995,7 @@ async def revise_preview(request: Request, payload: dict = Body(...)) -> Streami
         preview_data["tool_code"] = tool_code
         preview_data["test_code"] = test_code
         preview_data["manifest"] = manifest
+        preview_data["ui_files"] = ui_files
 
         yield blog(f"Re-installing preview of '{tool_name}'…")
         try:
@@ -1902,6 +2012,7 @@ async def revise_preview(request: Request, payload: dict = Body(...)) -> Streami
                 preview_data.get("requirements", []),
                 test_code,
                 manifest=manifest,
+                ui_files=ui_files,
             )
             preview_data["preview_installed"] = True
         except Exception as exc:

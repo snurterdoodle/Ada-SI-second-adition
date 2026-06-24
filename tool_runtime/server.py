@@ -83,6 +83,7 @@ async def install(name: str, payload: InstallRequest) -> dict:
         skip_pip=payload.skip_pip,
     )
     if not ok:
+        logger.error("Install failed for %s:\n%s", name, logs)
         raise HTTPException(status_code=502, detail=logs)
     return {"status": "ok", "logs": logs}
 

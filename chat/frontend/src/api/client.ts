@@ -66,6 +66,8 @@ export async function saveSkillData(
   })
 }
 
+export { callSkillAction } from './skillSdk'
+
 export async function deleteTool(toolName: string): Promise<void> {
   await requestJson(`/api/tools/${encodeURIComponent(toolName)}`, { method: 'DELETE' })
 }

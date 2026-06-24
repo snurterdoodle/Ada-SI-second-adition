@@ -10,12 +10,20 @@ export type SkillUiField = {
 }
 
 export type SkillUiConfig = {
-  template: 'calendar' | 'list' | 'table'
+  template: 'calendar' | 'list' | 'table' | 'custom'
+  entry?: string
   title_field?: string
   date_field?: string
   end_date_field?: string
   done_field?: string
   fields?: SkillUiField[]
+  actions?: {
+    fetch?: string
+    create?: string
+    delete?: string
+    toggle?: string
+    update?: string
+  }
 }
 
 export type ToolSummary = {
@@ -46,8 +54,16 @@ export type PromptsConfig = {
   forge_plan_prompt: string
   forge_revise_plan_prompt: string
   forge_edit_plan_prompt: string
-  forge_code_prompt: string
-  forge_edit_code_prompt: string
+  forge_code_headless_prompt: string
+  forge_code_interactive_builtin_prompt: string
+  forge_code_interactive_custom_prompt: string
+  forge_edit_code_headless_prompt: string
+  forge_edit_code_interactive_builtin_prompt: string
+  forge_edit_code_interactive_custom_prompt: string
+  forge_preview_review_prompt: string
+  forge_fix_preview_prompt: string
+  forge_revise_preview_builtin_prompt: string
+  forge_revise_preview_custom_prompt: string
   forge_fix_test_prompt: string
   forge_fix_codegen_prompt: string
   forge_fix_validation_prompt: string
@@ -61,8 +77,16 @@ export type EffectivePrompts = {
   forge_plan: string
   forge_revise_plan: string
   forge_edit_plan: string
-  forge_code: string
-  forge_edit_code: string
+  forge_code_headless: string
+  forge_code_interactive_builtin: string
+  forge_code_interactive_custom: string
+  forge_edit_code_headless: string
+  forge_edit_code_interactive_builtin: string
+  forge_edit_code_interactive_custom: string
+  forge_preview_review: string
+  forge_fix_preview: string
+  forge_revise_preview_builtin: string
+  forge_revise_preview_custom: string
   forge_fix_test: string
   forge_fix_codegen: string
   forge_fix_validation: string
@@ -85,8 +109,6 @@ export type AppConfig = {
   chat_model?: string
   second_model?: string
   tools?: ToolSummary[]
-  docker_available?: boolean
-  docker_message?: string
   tool_runtime_available?: boolean
   tool_runtime_url?: string
   lite_model_reasoning_effort?: string
@@ -337,6 +359,9 @@ export function createDefaultViewerPhases(): Record<string, PhaseStatus> {
     generate_code: 'pending',
     validate_code: 'pending',
     sandbox_test: 'pending',
+    validate_ui: 'pending',
+    contract_test: 'pending',
+    preview_review: 'pending',
     ui_preview: 'pending',
     pip_review: 'pending',
     runtime_verify: 'pending',

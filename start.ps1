@@ -159,20 +159,35 @@ function Test-HttpReady([string]$Url, [int]$TimeoutSec = 90) {
     return $false
 }
 
-function Stop-AdaServices {
-    if (-not (Test-Path $PidFile)) {
-        return
-    }
-    Get-Content $PidFile | ForEach-Object {
-        $pidText = $_.Trim()
-        if (-not $pidText) { return }
-        $procId = [int]$pidText
-        $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
+function Stop-PortListener([int]$Port) {
+    $connections = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+    foreach ($conn in $connections) {
+        $proc = Get-Process -Id $conn.OwningProcess -ErrorAction SilentlyContinue
         if ($proc) {
-            Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+            Write-Host "    Stopping $($proc.ProcessName) (PID $($proc.Id)) on port $Port" -ForegroundColor Yellow
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
         }
     }
-    Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
+}
+
+function Stop-AdaServices {
+    if (Test-Path $PidFile) {
+        Get-Content $PidFile | ForEach-Object {
+            $pidText = $_.Trim()
+            if (-not $pidText) { return }
+            $procId = [int]$pidText
+            $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
+            if ($proc) {
+                Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+            }
+        }
+        Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
+    }
+
+    # Orphaned listeners survive Ctrl+C if the pid file was lost; free Ada-SI ports.
+    foreach ($port in @(8080, 8090, 4000, 5173)) {
+        Stop-PortListener -Port $port
+    }
 }
 
 function Start-AdaProcess {
@@ -411,8 +426,6 @@ Write-Host "  Tool runtime: http://127.0.0.1:8090"
 Write-Host "  Logs:         $LogsDir"
 Write-Host ""
 Write-Host "Press Ctrl+C to stop all services, or run .\stop.ps1 from another terminal."
-Write-Warn "Tool forging sandbox still uses Docker if Docker Desktop is installed."
-Write-Warn "Chat and installed tools work without Docker."
 
 if (-not $NoBrowser) {
     Start-Process $appUrl | Out-Null

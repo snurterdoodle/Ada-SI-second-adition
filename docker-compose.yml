@@ -45,7 +45,6 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
       - ./chat/custom_tools:/app/custom_tools
       - ./chat/staging:/app/staging
       # Bind-mount built static for local iteration (run `npm run build` in chat/frontend first)
@@ -56,6 +55,7 @@ services:
       - ./chat/forger_guidance.py:/app/forger_guidance.py
       - ./chat/tools_engine.py:/app/tools_engine.py
       - ./chat/tool_creator.py:/app/tool_creator.py
+      - ./chat/tool_verify.py:/app/tool_verify.py
     environment:
       - LITELLM_URL=http://litellm:4000
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}

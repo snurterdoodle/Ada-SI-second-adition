@@ -9,19 +9,22 @@ import httpx
 
 from litellm_client import build_completion_payload, stream_completion_deltas
 from debug_log import log_block, log_debug, log_generated_code, log_plan, log_stream_delta
+from forge_routing import infer_codegen_profile, infer_revise_profile
 from prompts_config import (
-    get_forge_code_prompt,
-    get_forge_edit_code_prompt,
-    get_forge_edit_plan_prompt,
+    get_forge_code_prompt_for_profile,
+    get_forge_edit_code_prompt_for_profile,
     get_forge_fix_codegen_prompt,
+    get_forge_fix_preview_prompt,
     get_forge_fix_runtime_prompt,
     get_forge_fix_test_prompt,
     get_forge_fix_validation_prompt,
     get_forge_plan_prompt,
+    get_forge_preview_review_prompt,
     get_forge_revise_plan_prompt,
-    get_forge_revise_preview_prompt,
+    get_forge_revise_preview_prompt_for_profile,
+    get_forge_edit_plan_prompt,
 )
-from tools_engine import validate_manifest, validate_tool_module
+from tools_engine import validate_manifest, validate_tool_module, validate_ui_files
 
 MAX_PREVIEW_SCREENSHOT_BYTES = 2 * 1024 * 1024
 
@@ -59,6 +62,7 @@ def build_revise_preview_user_content(
     tool_code: str,
     test_code: str,
     screenshot_b64: str | None,
+    ui_files: dict[str, str] | None = None,
 ) -> str | list[dict]:
     text = (
         f"Tool name: `{tool_name}`\n\n"
@@ -73,8 +77,13 @@ def build_revise_preview_user_content(
         f"Current manifest:\n```json\n{manifest_json}\n```\n\n"
         f"Current tool_code:\n```python\n{tool_code}\n```\n\n"
         f"Current test_code:\n```python\n{test_code}\n```\n\n"
-        f"Return revised tool_code, test_code, and manifest."
     )
+    if ui_files:
+        text += (
+            f"Current ui_files:\n```json\n"
+            f"{json.dumps(ui_files, indent=2)}\n```\n\n"
+        )
+    text += "Return revised tool_code, test_code, manifest, and ui_files when template is custom."
     if not screenshot_b64:
         return text
     return [
@@ -338,13 +347,24 @@ def _extract_json_manifest_value(text: str) -> dict | None:
     return None
 
 
+def _parse_ui_files(raw: object) -> dict[str, str] | None:
+    if not isinstance(raw, dict):
+        return None
+    ui_files: dict[str, str] = {}
+    for key, value in raw.items():
+        if isinstance(key, str) and isinstance(value, str):
+            ui_files[key] = value
+    return ui_files or None
+
+
 def parse_revise_preview_response(
     raw: str,
     *,
     fallback_tool: str,
     fallback_test: str,
     fallback_manifest: dict | None,
-) -> tuple[str, str, dict | None]:
+    fallback_ui_files: dict[str, str] | None = None,
+) -> tuple[str, str, dict | None, dict[str, str] | None]:
     text = _strip_markdown_fences(raw)
     parse_error: str | None = None
 
@@ -364,6 +384,7 @@ def parse_revise_preview_response(
             tool_code or fallback_tool,
             test_code or fallback_test,
             manifest if manifest is not None else fallback_manifest,
+            fallback_ui_files,
         )
 
     tool_code = str(parsed.get("tool_code", "")).strip() or fallback_tool
@@ -373,15 +394,19 @@ def parse_revise_preview_response(
         manifest = fallback_manifest
     elif not isinstance(manifest, dict):
         manifest = fallback_manifest
-    return tool_code, test_code, manifest
+    ui_files = _parse_ui_files(parsed.get("ui_files"))
+    if ui_files is None:
+        ui_files = fallback_ui_files
+    return tool_code, test_code, manifest, ui_files
 
 
-def parse_generated_tool_response(raw: str) -> tuple[str, str, list[str], dict | None]:
+def parse_generated_tool_response(raw: str) -> tuple[str, str, list[str], dict | None, dict[str, str] | None]:
     text = _strip_markdown_fences(raw)
     tool_code = ""
     test_code = ""
     requirements: list[str] = []
     manifest: dict | None = None
+    ui_files: dict[str, str] | None = None
 
     try:
         parsed = _extract_json_object(text)
@@ -393,16 +418,18 @@ def parse_generated_tool_response(raw: str) -> tuple[str, str, list[str], dict |
         raw_manifest = parsed.get("manifest")
         if isinstance(raw_manifest, dict):
             manifest = raw_manifest
+        ui_files = _parse_ui_files(parsed.get("ui_files"))
     except (ValueError, json.JSONDecodeError):
         tool_code = (_extract_json_string_value(text, "tool_code") or "").strip()
         test_code = (_extract_json_string_value(text, "test_code") or "").strip()
+        ui_files = None
 
     if not tool_code or not test_code:
         raise ValueError(
             "Tool creator response missing tool_code or test_code. "
             "The model may have returned malformed JSON."
         )
-    return tool_code, test_code, requirements, manifest
+    return tool_code, test_code, requirements, manifest, ui_files
 
 
 def validate_test_code(test_code: str) -> tuple[bool, str]:
@@ -432,50 +459,6 @@ def validate_test_code(test_code: str) -> tuple[bool, str]:
     return True, ""
 
 
-async def repair_revise_preview_response(
-    tool_name: str,
-    feedback: str,
-    tool_code: str,
-    test_code: str,
-    manifest: dict | None,
-    raw_response: str,
-    error_message: str,
-    creator_model: str,
-    *,
-    litellm_url: str,
-    headers: dict[str, str],
-    run_id: str = "",
-    reasoning_effort: str | None = None,
-) -> tuple[str, str, dict | None]:
-    log_debug(run_id, "CODE_FIX", f"repairing preview revision JSON model={creator_model}")
-    manifest_json = json.dumps(manifest, indent=2) if manifest else "null"
-    user_content = (
-        f"Tool name: `{tool_name}`\n\n"
-        f"User feedback for the preview UI:\n{feedback}\n\n"
-        f"Parse error: {error_message}\n\n"
-        f"Malformed model output:\n```\n{raw_response[:12000]}\n```\n\n"
-        f"Current manifest:\n```json\n{manifest_json}\n```\n\n"
-        f"Return corrected tool_code, test_code, and manifest."
-    )
-    messages = [
-        {
-            "role": "system",
-            "content": get_forge_fix_codegen_prompt().replace("{tool_name}", tool_name),
-        },
-        {"role": "user", "content": user_content},
-    ]
-    raw = await _litellm_chat(
-        litellm_url, headers, creator_model, messages, temperature=0.1,
-        reasoning_effort=reasoning_effort,
-    )
-    return parse_revise_preview_response(
-        raw,
-        fallback_tool=tool_code,
-        fallback_test=test_code,
-        fallback_manifest=manifest,
-    )
-
-
 async def repair_generated_tool_response(
     plan: str,
     tool_name: str,
@@ -488,7 +471,7 @@ async def repair_generated_tool_response(
     run_id: str = "",
     edit_context: dict | None = None,
     reasoning_effort: str | None = None,
-) -> tuple[str, str, list[str], dict | None]:
+) -> tuple[str, str, list[str], dict | None, dict[str, str] | None]:
     log_debug(run_id, "CODE_FIX", f"repairing codegen JSON model={creator_model}")
     user_content = (
         f"Tool name: `{tool_name}`\n\n"
@@ -513,7 +496,7 @@ async def repair_generated_tool_response(
         litellm_url, headers, creator_model, messages, temperature=0.1,
         reasoning_effort=reasoning_effort,
     )
-    tool_code, test_code, requirements, _manifest = parse_generated_tool_response(raw)
+    tool_code, test_code, requirements, manifest, ui_files = parse_generated_tool_response(raw)
     log_generated_code(
         run_id,
         tool_name=tool_name,
@@ -521,7 +504,7 @@ async def repair_generated_tool_response(
         test_code=test_code,
         source="repair_codegen",
     )
-    return tool_code, test_code, requirements
+    return tool_code, test_code, requirements, manifest, ui_files
 
 
 async def repair_revise_preview_response(
@@ -538,7 +521,8 @@ async def repair_revise_preview_response(
     headers: dict[str, str],
     run_id: str = "",
     reasoning_effort: str | None = None,
-) -> tuple[str, str, dict | None]:
+    fallback_ui_files: dict[str, str] | None = None,
+) -> tuple[str, str, dict | None, dict[str, str] | None]:
     log_debug(run_id, "CODE_FIX", f"repairing preview revision JSON model={creator_model}")
     manifest_json = json.dumps(manifest, indent=2) if manifest else "null"
     user_content = (
@@ -547,7 +531,7 @@ async def repair_revise_preview_response(
         f"Parse error: {error_message}\n\n"
         f"Malformed model output:\n```\n{raw_response[:12000]}\n```\n\n"
         f"Current manifest:\n```json\n{manifest_json}\n```\n\n"
-        f"Return corrected tool_code, test_code, and manifest."
+        f"Return corrected tool_code, test_code, manifest, and ui_files when template is custom."
     )
     messages = [
         {
@@ -565,6 +549,7 @@ async def repair_revise_preview_response(
         fallback_tool=tool_code,
         fallback_test=test_code,
         fallback_manifest=manifest,
+        fallback_ui_files=fallback_ui_files,
     )
 
 
@@ -630,12 +615,14 @@ async def revise_preview_code(
     run_id: str = "",
     reasoning_effort: str | None = None,
     screenshot_base64: str | None = None,
-) -> tuple[str, str, dict | None]:
+    ui_files: dict[str, str] | None = None,
+) -> tuple[str, str, dict | None, dict[str, str] | None]:
     log_debug(run_id, "CODE_FIX", f"revising preview from UI feedback model={creator_model}")
     screenshot_b64 = normalize_preview_screenshot(screenshot_base64)
     if screenshot_b64:
         log_debug(run_id, "CODE_FIX", "preview revision includes UI screenshot")
     manifest_json = json.dumps(manifest, indent=2) if manifest else "null"
+    revise_profile = infer_revise_profile(manifest)
     user_content = build_revise_preview_user_content(
         tool_name=tool_name,
         feedback=feedback,
@@ -643,11 +630,14 @@ async def revise_preview_code(
         tool_code=tool_code,
         test_code=test_code,
         screenshot_b64=screenshot_b64,
+        ui_files=ui_files,
     )
     messages = [
         {
             "role": "system",
-            "content": get_forge_revise_preview_prompt().replace("{tool_name}", tool_name),
+            "content": get_forge_revise_preview_prompt_for_profile(revise_profile).replace(
+                "{tool_name}", tool_name
+            ),
         },
         {"role": "user", "content": user_content},
     ]
@@ -656,15 +646,16 @@ async def revise_preview_code(
         reasoning_effort=reasoning_effort,
     )
     try:
-        fixed_tool, fixed_test, fixed_manifest = parse_revise_preview_response(
+        fixed_tool, fixed_test, fixed_manifest, fixed_ui_files = parse_revise_preview_response(
             raw,
             fallback_tool=tool_code,
             fallback_test=test_code,
             fallback_manifest=manifest,
+            fallback_ui_files=ui_files,
         )
     except ValueError as exc:
         log_debug(run_id, "CODE_FIX", f"preview revision JSON parse failed: {exc}")
-        fixed_tool, fixed_test, fixed_manifest = await repair_revise_preview_response(
+        fixed_tool, fixed_test, fixed_manifest, fixed_ui_files = await repair_revise_preview_response(
             tool_name,
             feedback,
             tool_code,
@@ -677,6 +668,7 @@ async def revise_preview_code(
             headers=headers,
             run_id=run_id,
             reasoning_effort=reasoning_effort,
+            fallback_ui_files=ui_files,
         )
     if not validate_tool_module(fixed_tool):
         raise ValueError("Revised tool_code still missing get_tool_schema() or run().")
@@ -687,6 +679,9 @@ async def revise_preview_code(
         manifest_ok, manifest_reason = validate_manifest(fixed_manifest, tool_name)
         if not manifest_ok:
             raise ValueError(f"Revised manifest invalid: {manifest_reason}")
+        ui_ok, ui_reason = validate_ui_files(fixed_ui_files, fixed_manifest, tool_name)
+        if not ui_ok:
+            raise ValueError(f"Revised ui_files invalid: {ui_reason}")
     log_generated_code(
         run_id,
         tool_name=tool_name,
@@ -694,7 +689,144 @@ async def revise_preview_code(
         test_code=fixed_test,
         source="revise_preview",
     )
-    return fixed_tool, fixed_test, fixed_manifest
+    return fixed_tool, fixed_test, fixed_manifest, fixed_ui_files
+
+
+def _parse_preview_review_response(raw: str) -> tuple[bool, list[str]]:
+    parsed = _extract_json_object(raw)
+    if not isinstance(parsed, dict):
+        raise ValueError("Preview review response must be a JSON object.")
+    ok = parsed.get("ok") is True
+    issues_raw = parsed.get("issues", [])
+    issues = [str(i) for i in issues_raw] if isinstance(issues_raw, list) else []
+    return ok, issues
+
+
+async def review_interactive_preview(
+    tool_name: str,
+    tool_code: str,
+    test_code: str,
+    manifest: dict | None,
+    ui_files: dict[str, str] | None,
+    creator_model: str,
+    *,
+    litellm_url: str,
+    headers: dict[str, str],
+    run_id: str = "",
+    reasoning_effort: str | None = None,
+) -> tuple[bool, list[str]]:
+    log_debug(run_id, "PREVIEW_REVIEW", f"automated preview review tool={tool_name}")
+    manifest_json = json.dumps(manifest, indent=2) if manifest else "null"
+    ui_json = json.dumps(ui_files or {}, indent=2)
+    user_content = (
+        f"Tool name: `{tool_name}`\n\n"
+        f"manifest:\n```json\n{manifest_json}\n```\n\n"
+        f"tool_code:\n```python\n{tool_code}\n```\n\n"
+        f"test_code:\n```python\n{test_code}\n```\n\n"
+        f"ui_files:\n```json\n{ui_json}\n```\n\n"
+        f"Return ok true if ready for human preview, or ok false with issues list."
+    )
+    messages = [
+        {
+            "role": "system",
+            "content": get_forge_preview_review_prompt().replace("{tool_name}", tool_name),
+        },
+        {"role": "user", "content": user_content},
+    ]
+    raw = await _litellm_chat(
+        litellm_url, headers, creator_model, messages, temperature=0.1,
+        reasoning_effort=reasoning_effort,
+    )
+    try:
+        return _parse_preview_review_response(raw)
+    except ValueError as exc:
+        log_debug(run_id, "PREVIEW_REVIEW", f"parse failed: {exc}")
+        return False, [str(exc)]
+
+
+async def fix_preview_issues(
+    tool_name: str,
+    tool_code: str,
+    test_code: str,
+    manifest: dict | None,
+    ui_files: dict[str, str] | None,
+    issues: list[str],
+    creator_model: str,
+    *,
+    litellm_url: str,
+    headers: dict[str, str],
+    run_id: str = "",
+    reasoning_effort: str | None = None,
+) -> tuple[str, str, dict | None, dict[str, str] | None]:
+    log_debug(run_id, "CODE_FIX", f"fixing preview issues model={creator_model}")
+    manifest_json = json.dumps(manifest, indent=2) if manifest else "null"
+    ui_json = json.dumps(ui_files or {}, indent=2)
+    issues_text = "\n".join(f"- {issue}" for issue in issues) or "- unspecified issues"
+    user_content = (
+        f"Tool name: `{tool_name}`\n\n"
+        f"Issues to fix:\n{issues_text}\n\n"
+        f"Current manifest:\n```json\n{manifest_json}\n```\n\n"
+        f"Current tool_code:\n```python\n{tool_code}\n```\n\n"
+        f"Current test_code:\n```python\n{test_code}\n```\n\n"
+        f"Current ui_files:\n```json\n{ui_json}\n```\n\n"
+        f"Return corrected tool_code, test_code, manifest, and ui_files."
+    )
+    messages = [
+        {
+            "role": "system",
+            "content": get_forge_fix_preview_prompt().replace("{tool_name}", tool_name),
+        },
+        {"role": "user", "content": user_content},
+    ]
+    raw = await _litellm_chat(
+        litellm_url, headers, creator_model, messages, temperature=0.1,
+        reasoning_effort=reasoning_effort,
+    )
+    try:
+        fixed_tool, fixed_test, fixed_manifest, fixed_ui_files = parse_revise_preview_response(
+            raw,
+            fallback_tool=tool_code,
+            fallback_test=test_code,
+            fallback_manifest=manifest,
+            fallback_ui_files=ui_files,
+        )
+    except ValueError as exc:
+        log_debug(run_id, "CODE_FIX", f"preview fix JSON parse failed: {exc}")
+        fixed_tool, fixed_test, fixed_manifest, fixed_ui_files = await repair_revise_preview_response(
+            tool_name,
+            issues_text,
+            tool_code,
+            test_code,
+            manifest,
+            raw,
+            str(exc),
+            creator_model,
+            litellm_url=litellm_url,
+            headers=headers,
+            run_id=run_id,
+            reasoning_effort=reasoning_effort,
+            fallback_ui_files=ui_files,
+        )
+    if not validate_tool_module(fixed_tool):
+        raise ValueError("Fixed tool_code still missing get_tool_schema() or run().")
+    ok, reason = validate_test_code(fixed_test)
+    if not ok:
+        raise ValueError(f"Fixed test_code still invalid: {reason}")
+    if fixed_manifest:
+        manifest_ok, manifest_reason = validate_manifest(fixed_manifest, tool_name)
+        if not manifest_ok:
+            raise ValueError(f"Fixed manifest invalid: {manifest_reason}")
+        ui_ok, ui_reason = validate_ui_files(fixed_ui_files, fixed_manifest, tool_name)
+        if not ui_ok:
+            raise ValueError(f"Fixed ui_files invalid: {ui_reason}")
+    log_generated_code(
+        run_id,
+        tool_name=tool_name,
+        tool_code=fixed_tool,
+        test_code=fixed_test,
+        source="fix_preview",
+    )
+    return fixed_tool, fixed_test, fixed_manifest, fixed_ui_files
 
 
 async def fix_runtime_failure(
@@ -763,7 +895,7 @@ async def fix_test_code(
         f"Tool name: `{tool_name}`\n\n"
         f"Current tool_code (do NOT change):\n```python\n{tool_code}\n```\n\n"
         f"Current test_code (fix this):\n```python\n{test_code}\n```\n\n"
-        f"Sandbox failure output:\n```\n{sandbox_logs}\n```\n\n"
+        f"Verification failure output:\n```\n{sandbox_logs}\n```\n\n"
         f"Return fixed test_code only."
     )
     messages = [
@@ -818,18 +950,29 @@ async def generate_tool_code_stream(
                 f"Current manifest:\n```json\n"
                 f"{json.dumps(edit_context['manifest'], indent=2)}\n```\n\n"
             )
-        user_content += "Produce updated tool_code, test_code, requirements, and manifest."
-        system_prompt = get_forge_edit_code_prompt().replace("{tool_name}", tool_name)
+        if edit_context.get("ui_files"):
+            user_content += (
+                f"Current ui_files:\n```json\n"
+                f"{json.dumps(edit_context['ui_files'], indent=2)}\n```\n\n"
+            )
+        user_content += "Produce updated tool_code, test_code, requirements, manifest, and ui_files when custom."
+        profile = infer_codegen_profile(plan, manifest=edit_context.get("manifest"))
+        system_prompt = get_forge_edit_code_prompt_for_profile(profile).replace(
+            "{tool_name}", tool_name
+        )
     else:
         user_content = (
             f"Tool name: `{tool_name}`\n\n"
             f"Approved plan:\n{plan}\n\n"
             f"Generate tool_code, test_code, requirements, and manifest. "
             f"The tool file will be saved as {tool_name}.py "
-            f"and mounted in the sandbox at /workspace/{tool_name}.py. "
+            f"and verified at /workspace/{tool_name}.py in a temporary test venv. "
             f"Use manifest null for headless tools; include interactive manifest when the plan specifies an app UI."
         )
-        system_prompt = get_forge_code_prompt().replace("{tool_name}", tool_name)
+        profile = infer_codegen_profile(plan)
+        system_prompt = get_forge_code_prompt_for_profile(profile).replace(
+            "{tool_name}", tool_name
+        )
 
     messages = [
         {"role": "system", "content": system_prompt},

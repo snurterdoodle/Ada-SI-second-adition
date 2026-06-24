@@ -17,7 +17,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py tools_engine.py sandbox.py tool_creator.py litellm_client.py debug_log.py runtime_client.py build_pipeline.py prompts_config.py forger_guidance.py ./
+COPY app.py tools_engine.py tool_verify.py tool_creator.py litellm_client.py debug_log.py runtime_client.py build_pipeline.py prompts_config.py forger_guidance.py ./
 RUN mkdir -p custom_tools staging
 
 COPY --from=frontend-build /static ./static

@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { newRecordId, useSkillData } from '../../hooks/useSkillData'
+import { useSkillActions } from '../../hooks/useSkillActions'
 import type { SkillUiConfig } from '../../types/events'
 
 type CalendarAppProps = {
@@ -25,7 +25,7 @@ export function CalendarApp({ skillName, ui }: CalendarAppProps) {
   const titleField = ui.title_field || 'title'
   const dateField = ui.date_field || 'start'
   const endField = ui.end_date_field || 'end'
-  const { data, loading, error, persist } = useSkillData(skillName)
+  const { data, loading, error, create, remove } = useSkillActions(skillName, ui)
   const [cursor, setCursor] = useState(() => new Date())
   const [title, setTitle] = useState('')
   const [start, setStart] = useState('')
@@ -65,20 +65,19 @@ export function CalendarApp({ skillName, ui }: CalendarAppProps) {
 
   const handleCreate = async () => {
     if (!title.trim() || !start) return
-    const record: Record<string, unknown> = {
-      id: newRecordId(),
+    const params: Record<string, unknown> = {
       [titleField]: title.trim(),
       [dateField]: new Date(start).toISOString(),
     }
-    if (end) record[endField] = new Date(end).toISOString()
-    await persist({ records: [...data.records, record] })
+    if (end) params[endField] = new Date(end).toISOString()
+    await create(params)
     setTitle('')
     setStart('')
     setEnd('')
   }
 
   const handleDelete = async (id: string) => {
-    await persist({ records: data.records.filter((r) => r.id !== id) })
+    await remove({ event_id: id })
   }
 
   if (loading && data.records.length === 0) {

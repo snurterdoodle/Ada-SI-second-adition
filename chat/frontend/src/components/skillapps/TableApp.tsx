@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { newRecordId, useSkillData } from '../../hooks/useSkillData'
+import { useSkillActions } from '../../hooks/useSkillActions'
 import type { SkillUiConfig } from '../../types/events'
 
 type TableAppProps = {
@@ -12,7 +12,7 @@ export function TableApp({ skillName, ui }: TableAppProps) {
     () => ui.fields?.length ? ui.fields : [{ key: 'title', label: 'Title', type: 'string' as const }],
     [ui.fields],
   )
-  const { data, loading, error, persist } = useSkillData(skillName)
+  const { data, loading, error, create, remove } = useSkillActions(skillName, ui)
   const [draft, setDraft] = useState<Record<string, string>>(() =>
     Object.fromEntries(fields.map((f) => [f.key, ''])),
   )
@@ -20,20 +20,20 @@ export function TableApp({ skillName, ui }: TableAppProps) {
   const handleAdd = async () => {
     const hasValue = fields.some((f) => draft[f.key]?.trim())
     if (!hasValue) return
-    const record: Record<string, unknown> = { id: newRecordId() }
+    const params: Record<string, unknown> = {}
     for (const field of fields) {
       const raw = draft[field.key]?.trim() ?? ''
       if (!raw) continue
-      if (field.type === 'number') record[field.key] = Number(raw)
-      else if (field.type === 'boolean') record[field.key] = raw === 'true'
-      else record[field.key] = raw
+      if (field.type === 'number') params[field.key] = Number(raw)
+      else if (field.type === 'boolean') params[field.key] = raw === 'true'
+      else params[field.key] = raw
     }
-    await persist({ records: [...data.records, record] })
+    await create(params)
     setDraft(Object.fromEntries(fields.map((f) => [f.key, ''])))
   }
 
   const handleDelete = async (id: string) => {
-    await persist({ records: data.records.filter((r) => r.id !== id) })
+    await remove({ id })
   }
 
   if (loading && data.records.length === 0) {

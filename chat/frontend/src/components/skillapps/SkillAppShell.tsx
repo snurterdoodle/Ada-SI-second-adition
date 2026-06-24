@@ -4,6 +4,7 @@ import { useEffect } from 'react'
 import { IconSkill } from '../icons/GamifiedIcons'
 import { useAppStore } from '../../state/store'
 import { CalendarApp } from './CalendarApp'
+import { CustomSkillApp } from './CustomSkillApp'
 import { ListApp } from './ListApp'
 import { TableApp } from './TableApp'
 
@@ -68,12 +69,17 @@ export function SkillAppShell() {
               </button>
             </header>
 
-            <div className="skill-app-body">
+            <div
+              className={`skill-app-body${ui.template === 'custom' ? ' skill-app-body-iframe' : ''}`}
+            >
               {ui.template === 'calendar' && (
                 <CalendarApp skillName={activeSkillApp} ui={ui} />
               )}
               {ui.template === 'list' && <ListApp skillName={activeSkillApp} ui={ui} />}
               {ui.template === 'table' && <TableApp skillName={activeSkillApp} ui={ui} />}
+              {ui.template === 'custom' && (
+                <CustomSkillApp skillName={activeSkillApp} ui={ui} />
+              )}
             </div>
           </motion.div>
         </motion.div>

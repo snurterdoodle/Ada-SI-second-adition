@@ -5,7 +5,7 @@ import type { PromptsConfig } from '../types/events'
 const LEGACY_SYSTEM_STORAGE_KEY = 'ada-si-system-instructions'
 
 export function isPromptsConfigEmpty(prompts: PromptsConfig): boolean {
-  return !prompts.scout_orchestrator_prefix.trim() && !prompts.forge_plan_prompt.trim()
+  return !prompts.scout_orchestrator_prefix.trim() && !prompts.forge_code_headless_prompt.trim()
 }
 
 export async function loadPromptsIntoStore(): Promise<void> {

@@ -6,13 +6,15 @@ import json
 from pathlib import Path
 from typing import TypedDict
 
+from forge_routing import ForgeCodegenProfile, ForgeReviseProfile, infer_codegen_profile, infer_revise_profile
+
 # --- Scout agent defaults ---
 
 _DEFAULT_SCOUT_ORCHESTRATOR_PREFIX = """You are Ada-SI, a self-improving agent that extends itself by creating Python tools.
 
 Routing rules (follow strictly):
-1. If the user needs live or external data you cannot access directly — weather, stock prices, news, web lookups, account/system state, file I/O, scheduled jobs, or any API — call generate_new_tool. Do NOT reply with "I can't" or ask clarifying questions instead of calling the tool; put requirements (APIs, inputs, outputs) in the tool description.
-2. If the user wants a persistent app-like capability (calendar, todos, notes, tracker, journal) that they can also open as a popup mini-app, call generate_new_tool and describe it as an INTERACTIVE skill with the desired UI (calendar, list, or table template).
+1. If the user needs live or external data you cannot access directly — weather, stock prices, news, web lookups, account/system state, file I/O, scheduled jobs, TTS/audio (gTTS, pyttsx3, local speech synthesis, audio file output), or any API — call generate_new_tool. Do NOT reply with "I can't" or ask clarifying questions instead of calling the tool; put requirements (APIs, inputs, outputs) in the tool description.
+2. If the user wants a persistent app-like capability (calendar, todos, notes, tracker, journal, file browser, or custom layout) that they can open as a popup mini-app, call generate_new_tool and describe it as an INTERACTIVE skill. Use calendar, list, or table templates when they fit; use custom template for unique UIs (file manager, dashboards, multi-panel layouts).
 3. If an installed tool matches the request, call that tool first. Pass whatever arguments you have; the tool may return follow-up questions.
 4. If the user asks to see, view, open, or show an installed interactive skill app, call open_skill_app with the skill name.
 5. If the user asks to fix, change, or improve an existing installed tool, call edit_existing_tool with the tool name and a detailed description of the changes.
@@ -29,7 +31,8 @@ _DEFAULT_SCOUT_ADDITIONAL_DIRECTIVES = ""
 
 _DEFAULT_FORGE_RUNTIME_CONTEXT = """Runtime context (always true):
 - Forged Python tools execute locally on the user's machine in a dedicated tool runtime (Python 3.12 venv).
-- Tools can access the local filesystem under custom_tools/ and pip packages installed in the tool runtime."""
+- Tools can access the local filesystem under custom_tools/ and pip packages installed in the tool runtime.
+- TTS and audio tools are supported (e.g. gTTS, pyttsx3): generate speech/audio files, save under custom_tools/, and return file paths."""
 
 # --- Forge phase prompt defaults ---
 
@@ -37,7 +40,7 @@ _DEFAULT_FORGE_PLAN_PROMPT = """You are an expert Python tool architect for a se
 
 The user needs a new callable tool. Produce a clear implementation plan in markdown with these sections:
 ## Skill Kind and UI
-Decide headless vs interactive. For interactive skills (calendar, todos, notes, trackers), pick a UI template: calendar, list, or table. Define the record schema (fields, types) and operations (list, create, delete, etc.).
+Decide headless vs interactive. For interactive skills (calendar, todos, notes, trackers), pick a UI template: calendar, list, table, or custom (HTML/CSS/JS iframe for file managers and unique layouts). Define the record schema (fields, types) and operations (list, create, delete, etc.). Define manifest.ui.actions mapping UI intents to run(action=...) names.
 ## Architecture Changes
 ## Function Schema
 Use a single tool with an `action` enum parameter for interactive skills (e.g. list_events, create_event, delete_event).
@@ -67,56 +70,19 @@ The user wants to modify an EXISTING installed tool. Produce an updated implemen
 
 Reference the current tool behavior and describe only what must change. Do not write full Python code yet."""
 
-_DEFAULT_FORGE_CODE_PROMPT = """You are an expert Python developer building tools for a self-improving AI agent.
-
-Each tool module MUST define exactly:
-1. get_tool_schema() -> dict  (OpenAI-compatible function schema)
-2. run(**kwargs) -> str or JSON-serializable value
-
-Respond with ONLY valid JSON (no markdown fences) in this shape:
-{
-  "tool_code": "<full Python module source>",
-  "test_code": "<test_run.py that imports /workspace/{tool_name}.py and asserts run() works>",
-  "requirements": ["optional-pip-package>=1.0"],
-  "manifest": null
-}
-
-For INTERACTIVE skills, set manifest to:
-{
-  "kind": "interactive",
-  "display_name": "Human Name",
-  "icon": "calendar",
-  "ui": {
-    "template": "calendar",
-    "title_field": "title",
-    "date_field": "start",
-    "fields": [{"key": "title", "label": "Title", "type": "string"}]
-  },
-  "operations": ["list_events", "create_event", "delete_event"]
-}
-UI templates: calendar (scheduling), list (todos/notes), table (generic CRUD).
-For headless-only tools, set "manifest": null or {"kind": "headless"}.
-
-Interactive tool rules:
-- Persist data to Path(__file__).parent / "skill_data" / "{tool_name}.json"
-- Store shape: {"records": [{"id": "...", ...fields...}]}
-- Use run(action=...) with action enum matching manifest.operations
-- Create skill_data directory if missing
-
-Rules:
-- requirements: list every PyPI package the tool needs at runtime (e.g. httpx). Use [] for stdlib-only tools.
+_COMMON_CODEGEN_RULES = """Rules:
+- requirements: list every PyPI package the tool needs at runtime (e.g. httpx, pyttsx3). Use [] for stdlib-only tools.
 - Do NOT include pip, setuptools, or wheel in requirements.
 - tool_name must match the module filename stem
-- test_code runs inside python:3.12-slim with the tool mounted at /workspace/{tool_name}.py
-- Sandbox layout: tool code at /workspace/{tool_name}.py is read-only; /workspace/skill_data/ is writable and pre-seeded with {{"records": []}} for interactive skills
-- Interactive skill tests: call real run() CRUD actions — no filesystem mocks needed for skill_data persistence
+- Do NOT import third-party packages at module top level; lazy-import inside run() only. get_tool_schema() must be import-free.
+- Verification runs in a temporary local venv under chat/staging/ with requirements auto-installed before tests
+- test_code loads the tool from /workspace/{tool_name}.py (paths are rewritten to the verify workspace at runtime)
 - test_run.py must exit 0 on success
-- No network, subprocess calls, or writes outside /workspace during tests (skill_data writes inside /workspace are allowed)
 - Keep tools minimal and focused
 - In tool_code Python source use Python literals True, False, and None — never JSON true, false, or null
 - JSON string values MUST be valid JSON: escape every double quote inside code as \\", newlines as \\n, backslashes as \\\\
 - ALL file paths in run() return values MUST use the /workspace/ prefix (never /app/custom_tools/)
-- test_code MUST use this exact load pattern and mock external calls:
+- test_code MUST use this exact load pattern:
 
 import importlib.util
 
@@ -126,85 +92,305 @@ def load_tool():
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    return mod
+    return mod"""
 
-# Use unittest.mock.patch on network/subprocess before calling mod.run().
-# Interactive skills: test real persistence under /workspace/skill_data/ (writable, pre-seeded).
-# Headless skills: mock network/subprocess. Sandbox has NO network access.
+_DEFAULT_FORGE_CODE_HEADLESS_PROMPT = """You are an expert Python developer building HEADLESS tools for a self-improving AI agent.
 
-# Interactive skill test template:
-# mod = load_tool()
-# mod.run(action="create_...", ...)
-# state = mod.run(action="list_...")
-# assert records created/deleted as expected"""
+Each tool module MUST define exactly:
+1. get_tool_schema() -> dict  (OpenAI-compatible function schema)
+2. run(**kwargs) -> str or JSON-serializable value
 
-_DEFAULT_FORGE_EDIT_CODE_PROMPT = """You are an expert Python developer updating an existing tool for a self-improving AI agent.
+This is a HEADLESS tool — set "manifest": null and omit ui_files (or use empty ui_files {{}}).
+
+Respond with ONLY valid JSON (no markdown fences) in this shape:
+{{
+  "tool_code": "<full Python module source>",
+  "test_code": "<test_run.py>",
+  "requirements": [],
+  "manifest": null,
+  "ui_files": {{}}
+}}
+
+Headless test rules:
+- Mock network, subprocess, or TTS engine calls with unittest.mock.patch when live I/O is undesirable
+- Do NOT use interactive skill_data persistence patterns
+
+""" + _COMMON_CODEGEN_RULES
+
+_DEFAULT_FORGE_CODE_INTERACTIVE_BUILTIN_PROMPT = """You are an expert Python developer building INTERACTIVE skills with built-in UI templates (list, calendar, or table).
+
+Each tool module MUST define exactly:
+1. get_tool_schema() -> dict  (OpenAI-compatible function schema)
+2. run(**kwargs) -> str or JSON-serializable value
+
+The React app renders the popup UI — do NOT emit ui_files. Set manifest only.
+
+Respond with ONLY valid JSON (no markdown fences) in this shape:
+{{
+  "tool_code": "<full Python module source>",
+  "test_code": "<test_run.py>",
+  "requirements": [],
+  "manifest": {{
+    "kind": "interactive",
+    "display_name": "Human Name",
+    "icon": "list",
+    "operations": ["list_tasks", "add_task", "delete_task"],
+    "ui": {{
+      "template": "list",
+      "title_field": "title",
+      "done_field": "done",
+      "actions": {{
+        "fetch": "list_tasks",
+        "create": "add_task",
+        "delete": "delete_task",
+        "toggle": "complete_task"
+      }}
+    }}
+  }},
+  "ui_files": {{}}
+}}
+
+UI templates: calendar (scheduling), list (todos), table (generic CRUD).
+
+manifest.ui.actions (required):
+- fetch: optional list action
+- create: add record
+- delete: remove by id — params: task_id (list), event_id (calendar), id (table)
+- toggle: list only — params: task_id
+
+Interactive tool rules:
+- Persist data to Path(__file__).parent / "skill_data" / "{tool_name}.json"
+- Store shape: {{"records": [{{"id": "...", ...fields...}}]}}
+- Use run(action=...) with action enum matching manifest.operations
+- Interactive skill tests: call real run() CRUD — /workspace/skill_data/ is writable and pre-seeded with {{"records": []}}
+
+""" + _COMMON_CODEGEN_RULES
+
+_CUSTOM_APP_JS_SCAFFOLD = r'''AdaSkill.init();
+
+async function refresh() {
+  const data = await AdaSkill.getData();
+  const records = data.records || [];
+  // TODO: render records into the DOM
+}
+
+async function onCreate() {
+  // TODO: read form fields, then:
+  await AdaSkill.call('OPERATION_NAME', { /* params */ });
+  await refresh();
+}
+
+document.getElementById('add-btn').addEventListener('click', onCreate);
+AdaSkill.onDataChanged(refresh);
+AdaSkill.loadActionsFromTools().finally(refresh);'''
+
+_DEFAULT_FORGE_CODE_INTERACTIVE_CUSTOM_PROMPT = f"""You are an expert Python developer building INTERACTIVE skills with a CUSTOM iframe UI (HTML/CSS/JS).
 
 Each tool module MUST define exactly:
 1. get_tool_schema() -> dict  (OpenAI-compatible function schema)
 2. run(**kwargs) -> str or JSON-serializable value
 
 Respond with ONLY valid JSON (no markdown fences) in this shape:
-{
-  "tool_code": "<full updated Python module source>",
-  "test_code": "<updated test_run.py>",
-  "requirements": ["optional-pip-package>=1.0"],
-  "manifest": null
-}
+{{{{
+  "tool_code": "<full Python module source>",
+  "test_code": "<test_run.py>",
+  "requirements": [],
+  "manifest": {{{{
+    "kind": "interactive",
+    "display_name": "Human Name",
+    "icon": "file-text",
+    "operations": ["list_items", "add_item", "delete_item"],
+    "ui": {{{{
+      "template": "custom",
+      "entry": "index.html",
+      "actions": {{{{
+        "fetch": "list_items",
+        "create": "add_item",
+        "delete": "delete_item"
+      }}}}
+    }}}}
+  }}}},
+  "ui_files": {{{{
+    "index.html": "<!DOCTYPE html>... loads /static/skill-sdk.js and app.js",
+    "app.js": "...",
+    "styles.css": "..."
+  }}}}
+}}}}
 
-Include manifest when the skill is interactive (see forge code prompt for manifest shape).
+Custom UI rules:
+- No external CDN scripts; index.html MUST load /static/skill-sdk.js
+- Use AdaSkill singleton — do NOT use `new AdaSkill()`
+- AdaSkill.init() once at startup
+- AdaSkill.call('operation_name', {{{{ param: value }}}}) — first arg is action string, second is params
+- AdaSkill.getData() returns {{{{ records: [...] }}}} for rendering
+- Refresh UI after mutations via getData() or onDataChanged
 
-Rules:
+app.js scaffold (fill in DOM rendering and operation names):
+```
+{_CUSTOM_APP_JS_SCAFFOLD}
+```
+
+Interactive tool rules:
+- Persist data to Path(__file__).parent / "skill_data" / "{{tool_name}}.json"
+- Store shape: {{{{"records": [...]}}}}
+- manifest.operations must match run(action=...) enum
+- Interactive tests use real /workspace/skill_data/ CRUD
+
+""" + _COMMON_CODEGEN_RULES
+
+_COMMON_EDIT_RULES = """Rules:
 - Preserve tool_name as the module filename stem
 - In tool_code Python source use Python literals True, False, and None — never JSON true, false, or null
 - requirements: full list of PyPI packages needed after your edit (not just new ones)
-- test_code runs in sandbox at /workspace/{tool_name}.py; /workspace/skill_data/ is writable for interactive skills
-- Mock network/subprocess in test_code for headless tools; interactive skills test real skill_data CRUD
+- test_code loads the tool from /workspace/{tool_name}.py
 - ALL file paths in run() return values MUST use /workspace/ prefix
 - JSON string values MUST be valid JSON with escaped quotes and newlines"""
 
-_DEFAULT_FORGE_FIX_TEST_PROMPT = """You are an expert Python test engineer fixing sandbox test failures.
+_DEFAULT_FORGE_EDIT_CODE_HEADLESS_PROMPT = """You are an expert Python developer updating an existing HEADLESS tool.
 
-The tool module (tool_code) is correct — only fix test_code so it passes in an isolated
-python:3.12-slim container with NO network, the tool mounted read-only at /workspace/{tool_name}.py,
-and /workspace/skill_data/ writable with pre-seeded {{"records": []}} for interactive skills.
+Respond with ONLY valid JSON (no markdown fences):
+{{
+  "tool_code": "<full updated Python module source>",
+  "test_code": "<updated test_run.py>",
+  "requirements": [],
+  "manifest": null,
+  "ui_files": {{}}
+}}
+
+Set manifest null. Mock network/subprocess in test_code.
+
+""" + _COMMON_EDIT_RULES
+
+_DEFAULT_FORGE_EDIT_CODE_INTERACTIVE_BUILTIN_PROMPT = """You are an expert Python developer updating an INTERACTIVE skill with built-in UI (list, calendar, or table).
+
+Do NOT emit ui_files — React renders the popup. Update manifest when needed.
+
+Respond with ONLY valid JSON (no markdown fences):
+{{
+  "tool_code": "...",
+  "test_code": "...",
+  "requirements": [],
+  "manifest": {{ "kind": "interactive", "ui": {{ "template": "list", "actions": {{...}} }}, "operations": [...] }},
+  "ui_files": {{}}
+}}
+
+Interactive tests use real /workspace/skill_data/ CRUD.
+
+""" + _COMMON_EDIT_RULES
+
+_DEFAULT_FORGE_EDIT_CODE_INTERACTIVE_CUSTOM_PROMPT = """You are an expert Python developer updating an INTERACTIVE skill with CUSTOM iframe UI.
+
+Include ui_files when template is custom. index.html must load /static/skill-sdk.js.
+Use AdaSkill.init(), AdaSkill.call('action', {{params}}), AdaSkill.getData() — never `new AdaSkill()`.
+
+Respond with ONLY valid JSON (no markdown fences):
+{{
+  "tool_code": "...",
+  "test_code": "...",
+  "requirements": [],
+  "manifest": {{ "kind": "interactive", "ui": {{ "template": "custom", "entry": "index.html", "actions": {{...}} }} }},
+  "ui_files": {{ "index.html": "...", "app.js": "...", "styles.css": "..." }}
+}}
+
+""" + _COMMON_EDIT_RULES
+
+_DEFAULT_FORGE_PREVIEW_REVIEW_PROMPT = """You review an interactive skill before it is shown to the user in a popup preview.
+
+Check tool_code, test_code, manifest, and ui_files (when template is custom) for correctness.
+
+Respond with ONLY valid JSON (no markdown fences):
+{{ "ok": true }} OR {{ "ok": false, "issues": ["issue 1", "issue 2"] }}
+
+Review checklist:
+- manifest.kind is "interactive"
+- manifest.operations match run(action=...) enum in tool_code
+- manifest.ui.actions map create/delete/toggle to real operations
+- Record field names align with manifest.ui title_field, done_field, date_field
+- For custom template: index.html loads /static/skill-sdk.js; app.js uses AdaSkill.init() not new AdaSkill()
+- For custom template: AdaSkill.call uses string action as first arg; UI refreshes via getData()
+- For built-in templates: ui_files must be empty
+- test_code tests real skill_data CRUD under /workspace/skill_data/
+- Button/form wiring in custom app.js is plausible (handlers attached, not dead code)"""
+
+_DEFAULT_FORGE_FIX_PREVIEW_PROMPT = """You fix an interactive skill that failed automated preview QA (static UI lint, API contract test, or review issues).
+
+Given the issues list, return corrected artifacts.
+
+Respond with ONLY valid JSON (no markdown fences):
+{{ "tool_code": "...", "test_code": "...", "manifest": {{ ... }}, "ui_files": {{ ... }} }}
+
+Rules:
+- Preserve tool_name as the module filename stem
+- Fix every listed issue
+- manifest.kind must remain "interactive"
+- For custom template: fix app.js SDK usage; include full ui_files
+- For built-in templates: ui_files must be {{}}
+- test_code loads from /workspace/{tool_name}.py; use Python True/False/None
+- ALL file paths in run() return values use /workspace/ prefix"""
+
+_DEFAULT_FORGE_REVISE_PREVIEW_BUILTIN_PROMPT = """You revise an interactive skill preview (list, calendar, or table template) based on user UI feedback.
+
+The built-in React app renders the UI — fix tool_code, test_code, and manifest. Do NOT return ui_files.
+
+When a screenshot is attached, use it to spot layout issues, wrong fields, and empty states.
+
+Respond with ONLY valid JSON (no markdown fences):
+{{ "tool_code": "...", "test_code": "...", "manifest": {{ ... }}, "ui_files": {{}} }}
+
+Rules:
+- Preserve tool_name as the module filename stem
+- manifest.kind must remain "interactive"
+- Align manifest.ui with record shape in tool_code
+- manifest.operations must match run(action=...) enum values
+- manifest.ui.actions must map create/delete/toggle to operations
+- Persist to Path(__file__).parent / "skill_data" / "{tool_name}.json"
+- In tool_code use Python True, False, None — never JSON true/false/null
+- ALL file paths in run() return values use /workspace/ prefix"""
+
+_DEFAULT_FORGE_REVISE_PREVIEW_CUSTOM_PROMPT = """You revise an interactive skill preview with CUSTOM iframe UI based on user UI feedback.
+
+Fix tool_code, test_code, manifest, and ui_files so the UI and run(action=...) behavior match.
+
+When a screenshot is attached, use it to spot layout issues, broken buttons, SDK misuse, and empty states.
+
+Respond with ONLY valid JSON (no markdown fences):
+{{ "tool_code": "...", "test_code": "...", "manifest": {{ ... }}, "ui_files": {{ ... }} }}
+
+Custom UI SDK checklist:
+- index.html loads /static/skill-sdk.js
+- AdaSkill.init() — do NOT use `new AdaSkill()`
+- AdaSkill.call('operation', {{ params }}) — first arg is string action name
+- Refresh list via AdaSkill.getData().records after mutations
+- Wire click handlers to buttons; handle errors with console.error or alert
+
+Rules:
+- Preserve tool_name as the module filename stem
+- manifest.kind must remain "interactive"; template must stay "custom"
+- manifest.operations must match run(action=...) enum values
+- Persist to Path(__file__).parent / "skill_data" / "{tool_name}.json"
+- In tool_code use Python True, False, None — never JSON true/false/null
+- ALL file paths in run() return values use /workspace/ prefix"""
+
+_DEFAULT_FORGE_FIX_TEST_PROMPT = """You are an expert Python test engineer fixing verification test failures.
+
+The tool module (tool_code) is correct — only fix test_code so it passes in a temporary
+local venv with the tool at /workspace/{tool_name}.py and /workspace/skill_data/ writable
+with pre-seeded {{"records": []}} for interactive skills. Requirements are installed in the verify venv.
 
 Respond with ONLY valid JSON (no markdown fences):
 {{ "test_code": "<fixed test_run.py source>" }}
 
 Rules:
 - Use importlib.util.spec_from_file_location to load the tool from /workspace/{tool_name}.py
-- Mock network and subprocess calls with unittest.mock.patch
+- Mock network, subprocess, or TTS engine calls with unittest.mock.patch when live I/O is undesirable
 - Interactive skills: do NOT mock skill_data persistence — test real run() CRUD against /workspace/skill_data/
-- Headless skills: mock external I/O as needed
-- Assert paths using /workspace/ prefix when checking run() return values
-- test_run.py must exit 0 when run as: python /workspace/test_run.py"""
-
-_DEFAULT_FORGE_REVISE_PREVIEW_PROMPT = """You revise an interactive skill preview based on user UI feedback.
-
-The user tested the popup mini-app (calendar, list, or table template) and requested changes.
-Fix tool_code, test_code, and manifest so the UI and run(action=...) behavior match.
-
-When a screenshot of the current app UI is attached, use it to spot layout issues, wrong or missing fields,
-labels, empty states, and mismatches between manifest.ui and what is rendered.
-
-Respond with ONLY valid JSON (no markdown fences):
-{{ "tool_code": "...", "test_code": "...", "manifest": {{ ... }} }}
-
-Rules:
-- Preserve tool_name as the module filename stem
-- manifest.kind must remain "interactive"
-- Align manifest.ui.fields, title_field, date_field, done_field with record shape in tool_code
-- manifest.operations must match run(action=...) enum values
-- Persist to Path(__file__).parent / "skill_data" / "{tool_name}.json"
-- test_code loads from /workspace/{tool_name}.py; interactive tests use real /workspace/skill_data/ CRUD
-- In tool_code use Python True, False, None — never JSON true/false/null
-- ALL file paths in run() return values use /workspace/ prefix"""
+- Assert paths using /workspace/ prefix when checking run() return values (never host paths like C:/...)
+- test_run.py must exit 0 when run as: python test_run.py from the verify workspace directory"""
 
 _DEFAULT_FORGE_FIX_CODEGEN_PROMPT = """You repair malformed tool-creator JSON responses.
 
 Return ONLY valid JSON (no markdown fences):
-{{ "tool_code": "...", "test_code": "...", "requirements": [], "manifest": null }}
+{{ "tool_code": "...", "test_code": "...", "requirements": [], "manifest": null, "ui_files": {{}} }}
 
 Rules:
 - tool_code must define get_tool_schema() and run()
@@ -228,23 +414,23 @@ Rules:
 
 _DEFAULT_FORGE_FIX_RUNTIME_PROMPT = """You fix tool_code and/or test_code failures in the persistent tool runtime.
 
-Tests run with cwd=/app/custom_tools and /workspace symlinked to the same directory.
-Load tools via importlib from /workspace/{tool_name}.py.
+Tests run with cwd=custom_tools. Load tools via importlib from the tool module path.
+Use /workspace/ prefix in run() return values for consistency with verification tests.
 
 Respond with ONLY valid JSON (no markdown fences):
 {{ "tool_code": "...", "test_code": "..." }}
 
 Rules:
 - Fix path mismatches: use /workspace/ in run() return values AND test assertions
-- Mock network/subprocess in test_code; runtime has network but tests must not call live APIs
-- tool_code must keep get_tool_schema() and run()"""
+- Mock network/subprocess in test_code; runtime has network but tests must not call live APIs unless intended
+- tool_code must keep get_tool_schema() and run(); lazy-import third-party deps inside run() only"""
 
 # --- Tool schema descriptions ---
 
 _DEFAULT_TOOL_GENERATE_NEW_DESCRIPTION = (
     "Request creation of a new Python tool when the user needs a capability you do "
     "not have installed: live/real-time data (weather, markets, news), external APIs, "
-    "web fetching, persistence, filesystem access, or custom automation. "
+    "web fetching, persistence, filesystem access, TTS/audio (gTTS, pyttsx3), or custom automation. "
     "Call this instead of asking the user for details you could specify in description. "
     "Do not use for pure chat or static facts answerable without tools or APIs."
 )
@@ -263,13 +449,20 @@ PROMPT_KEYS = (
     "forge_plan_prompt",
     "forge_revise_plan_prompt",
     "forge_edit_plan_prompt",
-    "forge_code_prompt",
-    "forge_edit_code_prompt",
+    "forge_code_headless_prompt",
+    "forge_code_interactive_builtin_prompt",
+    "forge_code_interactive_custom_prompt",
+    "forge_edit_code_headless_prompt",
+    "forge_edit_code_interactive_builtin_prompt",
+    "forge_edit_code_interactive_custom_prompt",
+    "forge_preview_review_prompt",
+    "forge_fix_preview_prompt",
+    "forge_revise_preview_builtin_prompt",
+    "forge_revise_preview_custom_prompt",
     "forge_fix_test_prompt",
     "forge_fix_codegen_prompt",
     "forge_fix_validation_prompt",
     "forge_fix_runtime_prompt",
-    "forge_revise_preview_prompt",
     "tool_generate_new_description",
     "tool_edit_existing_description",
 )
@@ -277,7 +470,7 @@ PROMPT_KEYS = (
 CONFIG_DIR = Path(__file__).parent / "staging"
 CONFIG_PATH = CONFIG_DIR / "prompts_config.json"
 LEGACY_GUIDANCE_PATH = CONFIG_DIR / "forger_guidance.json"
-PROMPTS_DEFAULTS_REVISION = 2
+PROMPTS_DEFAULTS_REVISION = 6
 CONFIG_REVISION_KEY = "_defaults_revision"
 
 
@@ -289,13 +482,20 @@ class PromptsConfig(TypedDict):
     forge_plan_prompt: str
     forge_revise_plan_prompt: str
     forge_edit_plan_prompt: str
-    forge_code_prompt: str
-    forge_edit_code_prompt: str
+    forge_code_headless_prompt: str
+    forge_code_interactive_builtin_prompt: str
+    forge_code_interactive_custom_prompt: str
+    forge_edit_code_headless_prompt: str
+    forge_edit_code_interactive_builtin_prompt: str
+    forge_edit_code_interactive_custom_prompt: str
+    forge_preview_review_prompt: str
+    forge_fix_preview_prompt: str
+    forge_revise_preview_builtin_prompt: str
+    forge_revise_preview_custom_prompt: str
     forge_fix_test_prompt: str
     forge_fix_codegen_prompt: str
     forge_fix_validation_prompt: str
     forge_fix_runtime_prompt: str
-    forge_revise_preview_prompt: str
     tool_generate_new_description: str
     tool_edit_existing_description: str
 
@@ -305,12 +505,38 @@ class EffectivePrompts(TypedDict):
     forge_plan: str
     forge_revise_plan: str
     forge_edit_plan: str
-    forge_code: str
-    forge_edit_code: str
+    forge_code_headless: str
+    forge_code_interactive_builtin: str
+    forge_code_interactive_custom: str
+    forge_edit_code_headless: str
+    forge_edit_code_interactive_builtin: str
+    forge_edit_code_interactive_custom: str
+    forge_preview_review: str
+    forge_fix_preview: str
+    forge_revise_preview_builtin: str
+    forge_revise_preview_custom: str
     forge_fix_test: str
     forge_fix_codegen: str
     forge_fix_validation: str
     forge_fix_runtime: str
+
+
+_CODE_PROMPT_KEY: dict[ForgeCodegenProfile, str] = {
+    "headless": "forge_code_headless_prompt",
+    "interactive_builtin": "forge_code_interactive_builtin_prompt",
+    "interactive_custom": "forge_code_interactive_custom_prompt",
+}
+
+_EDIT_CODE_PROMPT_KEY: dict[ForgeCodegenProfile, str] = {
+    "headless": "forge_edit_code_headless_prompt",
+    "interactive_builtin": "forge_edit_code_interactive_builtin_prompt",
+    "interactive_custom": "forge_edit_code_interactive_custom_prompt",
+}
+
+_REVISE_PREVIEW_PROMPT_KEY: dict[ForgeReviseProfile, str] = {
+    "interactive_builtin": "forge_revise_preview_builtin_prompt",
+    "interactive_custom": "forge_revise_preview_custom_prompt",
+}
 
 
 _cache: PromptsConfig | None = None
@@ -320,14 +546,27 @@ _LEGACY_KEY_MAP = {
 }
 
 
-def _migrate_stale_prompts(config: PromptsConfig) -> PromptsConfig:
+def _apply_stale_prompt_replacements(config: PromptsConfig) -> tuple[PromptsConfig, bool]:
     """Replace saved prompts that still contain retired default text."""
     defaults = default_prompts_config()
     stale_markers = (
         "Do not create tools for microphone",
         "Tools cannot access local user hardware",
         "or requests involving microphone, camera, speakers",
+        "voice/TTS, screen capture",
+        "Do not use libraries that require microphones",
+        "other local hardware access",
+        "Politely explain these capabilities are not supported",
         "headless Docker container",
+        "python:3.12-slim container with NO network",
+        "Sandbox has NO network access",
+        "fixing sandbox test failures",
+        "runs in sandbox at /workspace",
+        "UI templates: calendar (scheduling), list (todos/notes), table (generic CRUD).",
+        "For headless-only tools, set \"manifest\": null or {\"kind\": \"headless\"}.",
+        "You are an expert Python developer building tools for a self-improving AI agent.",
+        "Include manifest when the skill is interactive (see forge code prompt for manifest shape).",
+        "You revise an interactive skill preview based on user UI feedback.",
     )
     updated = dict(config)
     changed = False
@@ -338,9 +577,14 @@ def _migrate_stale_prompts(config: PromptsConfig) -> PromptsConfig:
         if any(marker in value for marker in stale_markers):
             updated[key] = defaults[key]  # type: ignore[literal-required]
             changed = True
+    return updated, changed  # type: ignore[return-value]
+
+
+def _migrate_stale_prompts(config: PromptsConfig) -> PromptsConfig:
+    updated, changed = _apply_stale_prompt_replacements(config)
     if changed:
         return save_prompts_config(updated)
-    return config  # type: ignore[return-value]
+    return config
 
 
 def reset_prompts_config() -> PromptsConfig:
@@ -362,13 +606,20 @@ def default_prompts_config() -> PromptsConfig:
         "forge_plan_prompt": _DEFAULT_FORGE_PLAN_PROMPT,
         "forge_revise_plan_prompt": _DEFAULT_FORGE_REVISE_PLAN_PROMPT,
         "forge_edit_plan_prompt": _DEFAULT_FORGE_EDIT_PLAN_PROMPT,
-        "forge_code_prompt": _DEFAULT_FORGE_CODE_PROMPT,
-        "forge_edit_code_prompt": _DEFAULT_FORGE_EDIT_CODE_PROMPT,
+        "forge_code_headless_prompt": _DEFAULT_FORGE_CODE_HEADLESS_PROMPT,
+        "forge_code_interactive_builtin_prompt": _DEFAULT_FORGE_CODE_INTERACTIVE_BUILTIN_PROMPT,
+        "forge_code_interactive_custom_prompt": _DEFAULT_FORGE_CODE_INTERACTIVE_CUSTOM_PROMPT,
+        "forge_edit_code_headless_prompt": _DEFAULT_FORGE_EDIT_CODE_HEADLESS_PROMPT,
+        "forge_edit_code_interactive_builtin_prompt": _DEFAULT_FORGE_EDIT_CODE_INTERACTIVE_BUILTIN_PROMPT,
+        "forge_edit_code_interactive_custom_prompt": _DEFAULT_FORGE_EDIT_CODE_INTERACTIVE_CUSTOM_PROMPT,
+        "forge_preview_review_prompt": _DEFAULT_FORGE_PREVIEW_REVIEW_PROMPT,
+        "forge_fix_preview_prompt": _DEFAULT_FORGE_FIX_PREVIEW_PROMPT,
+        "forge_revise_preview_builtin_prompt": _DEFAULT_FORGE_REVISE_PREVIEW_BUILTIN_PROMPT,
+        "forge_revise_preview_custom_prompt": _DEFAULT_FORGE_REVISE_PREVIEW_CUSTOM_PROMPT,
         "forge_fix_test_prompt": _DEFAULT_FORGE_FIX_TEST_PROMPT,
         "forge_fix_codegen_prompt": _DEFAULT_FORGE_FIX_CODEGEN_PROMPT,
         "forge_fix_validation_prompt": _DEFAULT_FORGE_FIX_VALIDATION_PROMPT,
         "forge_fix_runtime_prompt": _DEFAULT_FORGE_FIX_RUNTIME_PROMPT,
-        "forge_revise_preview_prompt": _DEFAULT_FORGE_REVISE_PREVIEW_PROMPT,
         "tool_generate_new_description": _DEFAULT_TOOL_GENERATE_NEW_DESCRIPTION,
         "tool_edit_existing_description": _DEFAULT_TOOL_EDIT_EXISTING_DESCRIPTION,
     }
@@ -433,6 +684,7 @@ def load_prompts_config(*, refresh: bool = False) -> PromptsConfig:
 def save_prompts_config(data: dict) -> PromptsConfig:
     global _cache
     merged = _normalize_config(data)
+    merged, _ = _apply_stale_prompt_replacements(merged)
     CONFIG_DIR.mkdir(exist_ok=True)
     payload = {CONFIG_REVISION_KEY: PROMPTS_DEFAULTS_REVISION, **merged}
     CONFIG_PATH.write_text(
@@ -483,12 +735,27 @@ def get_forge_edit_plan_prompt() -> str:
     return _with_forge_appendix(load_prompts_config()["forge_edit_plan_prompt"])
 
 
-def get_forge_code_prompt() -> str:
-    return _with_forge_appendix(load_prompts_config()["forge_code_prompt"])
+def get_forge_code_prompt_for_profile(profile: ForgeCodegenProfile) -> str:
+    key = _CODE_PROMPT_KEY[profile]
+    return _with_forge_appendix(load_prompts_config()[key])  # type: ignore[literal-required]
 
 
-def get_forge_edit_code_prompt() -> str:
-    return _with_forge_appendix(load_prompts_config()["forge_edit_code_prompt"])
+def get_forge_edit_code_prompt_for_profile(profile: ForgeCodegenProfile) -> str:
+    key = _EDIT_CODE_PROMPT_KEY[profile]
+    return _with_forge_appendix(load_prompts_config()[key])  # type: ignore[literal-required]
+
+
+def get_forge_preview_review_prompt() -> str:
+    return _with_forge_appendix(load_prompts_config()["forge_preview_review_prompt"])
+
+
+def get_forge_fix_preview_prompt() -> str:
+    return _with_forge_appendix(load_prompts_config()["forge_fix_preview_prompt"])
+
+
+def get_forge_revise_preview_prompt_for_profile(profile: ForgeReviseProfile) -> str:
+    key = _REVISE_PREVIEW_PROMPT_KEY[profile]
+    return _with_forge_appendix(load_prompts_config()[key])  # type: ignore[literal-required]
 
 
 def get_forge_fix_test_prompt() -> str:
@@ -507,10 +774,6 @@ def get_forge_fix_runtime_prompt() -> str:
     return load_prompts_config()["forge_fix_runtime_prompt"]
 
 
-def get_forge_revise_preview_prompt() -> str:
-    return _with_forge_appendix(load_prompts_config()["forge_revise_preview_prompt"])
-
-
 def get_tool_generate_new_description() -> str:
     return load_prompts_config()["tool_generate_new_description"]
 
@@ -526,8 +789,24 @@ def build_effective_prompts() -> EffectivePrompts:
         "forge_plan": get_forge_plan_prompt(),
         "forge_revise_plan": get_forge_revise_plan_prompt(),
         "forge_edit_plan": get_forge_edit_plan_prompt(),
-        "forge_code": get_forge_code_prompt(),
-        "forge_edit_code": get_forge_edit_code_prompt(),
+        "forge_code_headless": get_forge_code_prompt_for_profile("headless"),
+        "forge_code_interactive_builtin": get_forge_code_prompt_for_profile("interactive_builtin"),
+        "forge_code_interactive_custom": get_forge_code_prompt_for_profile("interactive_custom"),
+        "forge_edit_code_headless": get_forge_edit_code_prompt_for_profile("headless"),
+        "forge_edit_code_interactive_builtin": get_forge_edit_code_prompt_for_profile(
+            "interactive_builtin"
+        ),
+        "forge_edit_code_interactive_custom": get_forge_edit_code_prompt_for_profile(
+            "interactive_custom"
+        ),
+        "forge_preview_review": get_forge_preview_review_prompt(),
+        "forge_fix_preview": get_forge_fix_preview_prompt(),
+        "forge_revise_preview_builtin": get_forge_revise_preview_prompt_for_profile(
+            "interactive_builtin"
+        ),
+        "forge_revise_preview_custom": get_forge_revise_preview_prompt_for_profile(
+            "interactive_custom"
+        ),
         "forge_fix_test": config["forge_fix_test_prompt"],
         "forge_fix_codegen": config["forge_fix_codegen_prompt"],
         "forge_fix_validation": config["forge_fix_validation_prompt"],

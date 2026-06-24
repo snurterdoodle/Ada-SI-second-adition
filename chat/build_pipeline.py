@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 from debug_log import log_build_event, log_pip_install, log_runtime_call
 from runtime_client import runtime_install_tool, runtime_pip_install
-from sandbox import verify_tool_in_sandbox
+from tool_verify import verify_tool_in_ephemeral_venv
 from tool_creator import (
     fix_runtime_failure,
     fix_test_code,
@@ -73,6 +73,7 @@ async def stream_runtime_install(
     test_code: str,
     requirements: list[str],
     manifest: dict | None = None,
+    ui_files: dict[str, str] | None = None,
     new_packages: list[str],
     creator_model: str,
     litellm_url: str,
@@ -160,7 +161,12 @@ async def stream_runtime_install(
             )
             log_runtime_call(run_id, action="install", tool_name=tool_name, logs=runtime_logs)
             write_tool_files(
-                tool_name, current_tool, requirements, current_test, manifest=manifest
+                tool_name,
+                current_tool,
+                requirements,
+                current_test,
+                manifest=manifest,
+                ui_files=ui_files,
             )
             tool_code = current_tool
             test_code = current_test
@@ -258,6 +264,7 @@ async def maybe_pause_for_pip_approval(
     test_code: str,
     requirements: list[str],
     manifest: dict | None = None,
+    ui_files: dict[str, str] | None = None,
     creator_model: str,
     step: Callable[..., str],
     phase: Callable[..., str],
@@ -281,6 +288,7 @@ async def maybe_pause_for_pip_approval(
         "test_code": test_code,
         "requirements": requirements,
         "manifest": manifest,
+        "ui_files": ui_files,
         "creator_model": creator_model,
         "reasoning_effort": reasoning_effort,
         "created_at": time.time(),
@@ -319,6 +327,7 @@ async def maybe_pause_for_ui_preview(
     test_code: str,
     requirements: list[str],
     manifest: dict | None,
+    ui_files: dict[str, str] | None = None,
     creator_model: str,
     step: Callable[..., str],
     phase: Callable[..., str],
@@ -340,6 +349,7 @@ async def maybe_pause_for_ui_preview(
         "test_code": test_code,
         "requirements": requirements,
         "manifest": manifest,
+        "ui_files": ui_files,
         "creator_model": creator_model,
         "reasoning_effort": reasoning_effort,
         "preview_installed": False,
@@ -365,7 +375,12 @@ async def maybe_pause_for_ui_preview(
                 skip_pip=True,
             )
             write_tool_files(
-                tool_name, tool_code, requirements, test_code, manifest=manifest
+                tool_name,
+                tool_code,
+                requirements,
+                test_code,
+                manifest=manifest,
+                ui_files=ui_files,
             )
             preview_data["preview_installed"] = True
             yield blog("Preview installed — open the app and try it before approving.")
@@ -419,6 +434,7 @@ async def continue_tool_build(
     test_code: str,
     requirements: list[str],
     manifest: dict | None,
+    ui_files: dict[str, str] | None = None,
     creator_model: str,
     litellm_url: str,
     litellm_headers: dict[str, str],
@@ -439,6 +455,7 @@ async def continue_tool_build(
         test_code=test_code,
         requirements=requirements,
         manifest=manifest,
+        ui_files=ui_files,
         creator_model=creator_model,
         step=step,
         phase=phase,
@@ -480,6 +497,7 @@ async def continue_tool_build(
         test_code=test_code,
         requirements=requirements,
         manifest=manifest,
+        ui_files=ui_files,
         new_packages=new_packages,
         creator_model=creator_model,
         litellm_url=litellm_url,
@@ -501,6 +519,7 @@ async def run_sandbox_phase(
     tool_name: str,
     tool_code: str,
     test_code: str,
+    requirements: list[str],
     manifest: dict | None = None,
     creator_model: str,
     litellm_url: str,
@@ -512,7 +531,7 @@ async def run_sandbox_phase(
     cancelled: Callable[[], Any],
     reasoning_effort: str | None = None,
 ) -> tuple[bool, str, str, str, list[tuple[str, str]]]:
-    """Run sandbox with auto-retry. Returns (success, logs, test_code, tool_code, notices)."""
+    """Run ephemeral venv verification with auto-retry."""
     log_output = ""
     current_test = test_code
     current_tool = tool_code
@@ -521,8 +540,12 @@ async def run_sandbox_phase(
         if await cancelled():
             return False, log_output, current_test, current_tool, notices
 
-        success, log_output = verify_tool_in_sandbox(
-            tool_name, current_tool, current_test, manifest=manifest
+        success, log_output = verify_tool_in_ephemeral_venv(
+            tool_name,
+            current_tool,
+            current_test,
+            requirements,
+            manifest=manifest,
         )
         if success:
             return True, log_output, current_test, current_tool, notices
@@ -531,14 +554,23 @@ async def run_sandbox_phase(
             notices.append(
                 (
                     "warn",
-                    f"Sandbox failed (attempt {attempt + 1}) — auto-fixing test_code…",
+                    f"Verification failed (attempt {attempt + 1}) — auto-fixing test_code…",
                 )
             )
             fix_hint = ""
             if "Read-only file system" in log_output or "Errno 30" in log_output:
                 fix_hint = (
-                    "\n\nNote: /workspace/skill_data should be writable for interactive skills. "
+                    "\n\nNote: workspace/skill_data should be writable for interactive skills. "
                     "If persistence still fails, mock only non-skill_data filesystem calls."
+                )
+            elif "AssertionError" in log_output and (
+                "Successfully generated" in log_output
+                or "/workspace/" in log_output
+                or "tts_output_" in log_output
+            ):
+                fix_hint = (
+                    "\n\nNote: run() return values use the /workspace/ prefix. "
+                    "Assert /workspace/ paths in results — not host paths like C:/ or the verify staging directory."
                 )
             try:
                 current_test = await fix_test_code(

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { newRecordId, useSkillData } from '../../hooks/useSkillData'
+import { useSkillActions } from '../../hooks/useSkillActions'
 import type { SkillUiConfig } from '../../types/events'
 
 type ListAppProps = {
@@ -9,31 +9,23 @@ type ListAppProps = {
 
 export function ListApp({ skillName, ui }: ListAppProps) {
   const titleField = ui.title_field || 'title'
-  const doneField = ui.done_field || 'done'
-  const { data, loading, error, persist } = useSkillData(skillName)
+  const { data, loading, error, create, remove, toggle } = useSkillActions(skillName, ui)
   const [draft, setDraft] = useState('')
+
+  const doneField = ui.done_field || 'done'
 
   const handleAdd = async () => {
     if (!draft.trim()) return
-    const record: Record<string, unknown> = {
-      id: newRecordId(),
-      [titleField]: draft.trim(),
-      [doneField]: false,
-    }
-    await persist({ records: [...data.records, record] })
+    await create({ [titleField]: draft.trim() })
     setDraft('')
   }
 
-  const toggleDone = async (id: string) => {
-    await persist({
-      records: data.records.map((record) =>
-        record.id === id ? { ...record, [doneField]: !record[doneField] } : record,
-      ),
-    })
+  const handleToggle = async (id: string) => {
+    await toggle({ task_id: id })
   }
 
   const handleDelete = async (id: string) => {
-    await persist({ records: data.records.filter((r) => r.id !== id) })
+    await remove({ task_id: id })
   }
 
   if (loading && data.records.length === 0) {
@@ -75,7 +67,7 @@ export function ListApp({ skillName, ui }: ListAppProps) {
                   <input
                     type="checkbox"
                     checked={done}
-                    onChange={() => id && void toggleDone(id)}
+                    onChange={() => id && void handleToggle(id)}
                   />
                   <span>{String(record[titleField] ?? 'Untitled')}</span>
                 </label>
