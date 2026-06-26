@@ -45,6 +45,56 @@ def test_validate_manifest_custom_requires_entry():
     assert ok, reason
 
 
+def test_validate_manifest_custom_accepts_arbitrary_action_keys():
+    manifest = {
+        "kind": "interactive",
+        "display_name": "Stopwatch",
+        "operations": ["get_state", "start", "stop", "reset"],
+        "ui": {
+            "template": "custom",
+            "entry": "index.html",
+            "actions": {
+                "getState": "get_state",
+                "start": "start",
+                "stop": "stop",
+                "reset": "reset",
+            },
+        },
+    }
+    ok, reason = tools_engine.validate_manifest(manifest, "stopwatch_app")
+    assert ok, reason
+
+
+def test_validate_manifest_custom_accepts_partial_actions():
+    manifest = {
+        "kind": "interactive",
+        "display_name": "Notes",
+        "operations": ["list_notes", "add_note"],
+        "ui": {
+            "template": "custom",
+            "entry": "index.html",
+            "actions": {"fetch": "list_notes"},
+        },
+    }
+    ok, reason = tools_engine.validate_manifest(manifest, "notes_app")
+    assert ok, reason
+
+
+def test_validate_manifest_builtin_rejects_arbitrary_action_keys():
+    manifest = {
+        "kind": "interactive",
+        "display_name": "Bad",
+        "operations": ["start", "stop"],
+        "ui": {
+            "template": "list",
+            "actions": {"start": "start", "stop": "stop"},
+        },
+    }
+    ok, reason = tools_engine.validate_manifest(manifest, "bad_app")
+    assert not ok
+    assert "Unknown manifest.ui.actions key" in reason
+
+
 def test_validate_ui_files_requires_index():
     manifest = {
         "kind": "interactive",
@@ -148,13 +198,39 @@ def test_validate_ui_js_accepts_good_pattern():
     assert ok, reason
 
 
+def test_validate_ui_js_custom_allows_call_without_getdata():
+    manifest = {
+        "kind": "interactive",
+        "ui": {
+            "template": "custom",
+            "entry": "index.html",
+            "actions": {"start": "start", "stop": "stop"},
+        },
+    }
+    ui_files = {
+        "index.html": '<script src="/static/skill-sdk.js"></script>',
+        "app.js": (
+            "AdaSkill.init();\n"
+            "document.getElementById('start-btn').addEventListener('click', () => {\n"
+            "  AdaSkill.call('start', {});\n"
+            "});\n"
+        ),
+    }
+    ok, reason = tools_engine.validate_ui_js(ui_files, manifest)
+    assert ok, reason
+
+
 if __name__ == "__main__":
     test_validate_manifest_requires_ui_actions()
     test_validate_manifest_custom_requires_entry()
+    test_validate_manifest_custom_accepts_arbitrary_action_keys()
+    test_validate_manifest_custom_accepts_partial_actions()
+    test_validate_manifest_builtin_rejects_arbitrary_action_keys()
     test_validate_ui_files_requires_index()
     test_write_and_resolve_ui_files()
     test_tool_artifact_paths_includes_ui_dir()
     test_normalize_interactive_manifest_infers_list_actions()
     test_validate_ui_js_rejects_new_ada_skill()
     test_validate_ui_js_accepts_good_pattern()
+    test_validate_ui_js_custom_allows_call_without_getdata()
     print("All test_skill_ui tests passed.")

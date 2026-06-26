@@ -1,0 +1,25 @@
+{
+  "kind": "interactive",
+  "display_name": "Interactive Timer",
+  "icon": "clock",
+  "operations": [
+    "list_timers",
+    "create_timer",
+    "start_timer",
+    "pause_timer",
+    "reset_timer",
+    "delete_timer"
+  ],
+  "ui": {
+    "template": "custom",
+    "entry": "index.html",
+    "actions": {
+      "fetch": "list_timers",
+      "create": "create_timer",
+      "delete": "delete_timer",
+      "start": "start_timer",
+      "pause": "pause_timer",
+      "reset": "reset_timer"
+    }
+  }
+}

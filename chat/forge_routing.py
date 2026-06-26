@@ -26,23 +26,28 @@ def infer_codegen_profile(
         if kind != "interactive":
             return "headless"
         ui = manifest.get("ui") or {}
-        if ui.get("template") == "custom":
-            return "interactive_custom"
-        return "interactive_builtin"
+        template = ui.get("template")
+        if template in _BUILTIN_TEMPLATES:
+            return "interactive_builtin"
+        return "interactive_custom"
 
     text = _plan_lower(plan)
     if re.search(r"\bheadless\b", text) and not re.search(r"\binteractive\b", text):
         return "headless"
-    if re.search(r"template\s*:\s*custom", text) or "custom iframe" in text or "custom ui" in text:
-        return "interactive_custom"
     if re.search(r"\binteractive\b", text):
-        if any(t in text for t in ("template: list", "template: calendar", "template: table", "template list", "template calendar", "template table")):
+        if any(
+            t in text
+            for t in (
+                "template: list",
+                "template: calendar",
+                "template: table",
+                "template list",
+                "template calendar",
+                "template table",
+            )
+        ):
             return "interactive_builtin"
-        if re.search(r"\b(list|calendar|table)\b", text) and "custom" not in text:
-            return "interactive_builtin"
-        if "custom" in text:
-            return "interactive_custom"
-        return "interactive_builtin"
+        return "interactive_custom"
     return "headless"
 
 

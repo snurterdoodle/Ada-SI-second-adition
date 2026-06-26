@@ -159,6 +159,72 @@ NOTES_MANIFEST = {
     },
 }
 
+STOPWATCH_TOOL = '''
+import json
+import time
+from pathlib import Path
+
+def get_tool_schema():
+    return {
+        "name": "stopwatch_app",
+        "description": "Stopwatch",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["get_state", "start", "stop", "reset"],
+                }
+            },
+            "required": ["action"],
+        },
+    }
+
+def run(action):
+    p = Path(__file__).parent / "skill_data" / "stopwatch_app.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    default_state = {
+        "id": "stopwatch_state",
+        "is_running": False,
+        "start_time": 0.0,
+        "accumulated_time": 0.0,
+    }
+    if p.exists():
+        data = json.loads(p.read_text())
+        records = data.get("records", [])
+        state = records[0] if records else default_state.copy()
+    else:
+        state = default_state.copy()
+    now = time.time()
+    if action == "start" and not state["is_running"]:
+        state["is_running"] = True
+        state["start_time"] = now
+    elif action == "stop" and state["is_running"]:
+        state["is_running"] = False
+        state["accumulated_time"] += now - state["start_time"]
+        state["start_time"] = 0.0
+    elif action == "reset":
+        state = default_state.copy()
+    p.write_text(json.dumps({"records": [state]}))
+    return {"records": [state]}
+'''
+
+STOPWATCH_MANIFEST = {
+    "kind": "interactive",
+    "display_name": "Stopwatch",
+    "operations": ["get_state", "start", "stop", "reset"],
+    "ui": {
+        "template": "custom",
+        "entry": "index.html",
+        "actions": {
+            "getState": "get_state",
+            "start": "start",
+            "stop": "stop",
+            "reset": "reset",
+        },
+    },
+}
+
 
 def test_verify_skill_api_contract_list():
     ok, reason = tools_engine.verify_skill_api_contract(
@@ -181,8 +247,16 @@ def test_verify_skill_api_contract_custom_notes():
     assert ok, reason
 
 
+def test_verify_skill_api_contract_custom_stopwatch():
+    ok, reason = tools_engine.verify_skill_api_contract(
+        "stopwatch_app", STOPWATCH_TOOL, dict(STOPWATCH_MANIFEST)
+    )
+    assert ok, reason
+
+
 if __name__ == "__main__":
     test_verify_skill_api_contract_list()
     test_verify_skill_api_contract_table()
     test_verify_skill_api_contract_custom_notes()
+    test_verify_skill_api_contract_custom_stopwatch()
     print("All test_skill_contract tests passed.")

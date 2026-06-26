@@ -14,7 +14,7 @@ _DEFAULT_SCOUT_ORCHESTRATOR_PREFIX = """You are Ada-SI, a self-improving agent t
 
 Routing rules (follow strictly):
 1. If the user needs live or external data you cannot access directly — weather, stock prices, news, web lookups, account/system state, file I/O, scheduled jobs, TTS/audio (gTTS, pyttsx3, local speech synthesis, audio file output), or any API — call generate_new_tool for a SINGLE tool, or propose_tool_batch when the user needs 2–10 independent tools at once. Do NOT reply with "I can't" or ask clarifying questions instead of calling the tool; put requirements (APIs, inputs, outputs) in the tool description.
-2. If the user wants a persistent app-like capability (calendar, todos, notes, tracker, journal, file browser, or custom layout) that they can open as a popup mini-app, call generate_new_tool and describe it as an INTERACTIVE skill — one skill per app. Use calendar, list, or table templates when they fit; use custom template for unique UIs (file manager, dashboards, multi-panel layouts). Do NOT batch multiple apps; use one interactive skill with multiple actions instead.
+2. If the user wants a persistent app-like capability (calendar, todos, notes, tracker, journal, file browser, stopwatch, counter, timer, game, or custom layout) that they can open as a popup mini-app, call generate_new_tool and describe it as an INTERACTIVE skill — one skill per app. Always use template: custom with HTML/CSS/JS ui_files. Define operations freely (any names) and map UI intents to operations in manifest.ui.actions (any key names, e.g. start, pause, reset or fetch, create, delete). Do NOT batch multiple apps; use one interactive skill with multiple actions instead.
 3. If the user needs 2–10 separate independent capabilities (e.g. weather tool AND stock tool), call propose_tool_batch with each tool listed — not multiple generate_new_tool calls.
 4. If an installed tool matches the request, call that tool first. Pass whatever arguments you have; the tool may return follow-up questions.
 5. If the user asks to see, view, open, or show an installed interactive skill app, call open_skill_app with the skill name.
@@ -41,12 +41,12 @@ _DEFAULT_FORGE_PLAN_PROMPT = """You are an expert Python tool architect for a se
 
 The user needs a new callable tool. Produce a clear implementation plan in markdown with these sections:
 ## Skill Kind and UI
-Decide headless vs interactive. For interactive skills (calendar, todos, notes, trackers), pick a UI template: calendar, list, table, or custom (HTML/CSS/JS iframe for file managers and unique layouts). Define the record schema (fields, types) and operations (list, create, delete, etc.). Define manifest.ui.actions mapping UI intents to run(action=...) names.
+Decide headless vs interactive. For interactive skills, always use template: custom with a custom HTML/CSS/JS iframe UI (ui_files). Define operations freely (any names matching run(action=...)). Map each UI button or intent to an operation in manifest.ui.actions — action keys may be any names (e.g. start, pause, reset or fetch, create, delete). Describe the UI layout, state shape, and persistence (typically skill_data JSON under Path(__file__).parent / "skill_data" / "{tool_name}.json"; use {"records": [...]} or a single state object in records[0] as appropriate).
 ## Architecture Changes
 ## Function Schema
-Use a single tool with an `action` enum parameter for interactive skills (e.g. list_events, create_event, delete_event).
+Use a single tool with an `action` enum parameter for interactive skills (e.g. get_state, start, pause, reset — or list_items, add_item, delete_item).
 ## Execution Steps
-Interactive skills persist data to Path(__file__).parent / "skill_data" / "{tool_name}.json" as {"records": [...]}.
+Interactive skills persist data to Path(__file__).parent / "skill_data" / "{tool_name}.json" when persistence is needed.
 ## Risks and Limitations
 
 Be specific about inputs, outputs, and edge cases. Do not write full Python code yet."""
@@ -118,7 +118,9 @@ Headless test rules:
 
 """ + _COMMON_CODEGEN_RULES
 
-_DEFAULT_FORGE_CODE_INTERACTIVE_BUILTIN_PROMPT = """You are an expert Python developer building INTERACTIVE skills with built-in UI templates (list, calendar, or table).
+_DEFAULT_FORGE_CODE_INTERACTIVE_BUILTIN_PROMPT = """You are an expert Python developer building INTERACTIVE skills with LEGACY built-in UI templates (list, calendar, or table).
+
+Use this profile ONLY when editing an existing skill that already uses template list, calendar, or table. New interactive skills should use the custom iframe prompt instead.
 
 Each tool module MUST define exactly:
 1. get_tool_schema() -> dict  (OpenAI-compatible function schema)
@@ -170,18 +172,17 @@ Interactive tool rules:
 _CUSTOM_APP_JS_SCAFFOLD = r'''AdaSkill.init();
 
 async function refresh() {
+  // Optional: load persisted state via AdaSkill.getData()
   const data = await AdaSkill.getData();
   const records = data.records || [];
-  // TODO: render records into the DOM
+  // TODO: render state into the DOM
 }
 
-async function onCreate() {
-  // TODO: read form fields, then:
+document.getElementById('action-btn').addEventListener('click', async () => {
   await AdaSkill.call('OPERATION_NAME', { /* params */ });
   await refresh();
-}
+});
 
-document.getElementById('add-btn').addEventListener('click', onCreate);
 AdaSkill.onDataChanged(refresh);
 AdaSkill.loadActionsFromTools().finally(refresh);'''
 
@@ -200,14 +201,15 @@ Respond with ONLY valid JSON (no markdown fences) in this shape:
     "kind": "interactive",
     "display_name": "Human Name",
     "icon": "file-text",
-    "operations": ["list_items", "add_item", "delete_item"],
+    "operations": ["get_state", "start", "pause", "reset"],
     "ui": {{{{
       "template": "custom",
       "entry": "index.html",
       "actions": {{{{
-        "fetch": "list_items",
-        "create": "add_item",
-        "delete": "delete_item"
+        "getState": "get_state",
+        "start": "start",
+        "pause": "pause",
+        "reset": "reset"
       }}}}
     }}}}
   }}}},
@@ -218,13 +220,23 @@ Respond with ONLY valid JSON (no markdown fences) in this shape:
   }}}}
 }}}}
 
+manifest.ui.actions:
+- Keys may be ANY names (UI intent labels, e.g. getState, start, addItem, rollDice)
+- Values MUST be operation names listed in manifest.operations
+- Map each button/control to the operation it triggers
+
+Examples (all valid):
+- Stopwatch: operations get_state, start, pause, reset — actions {{getState, start, pause, reset}}
+- Todo app: operations list_items, add_item, delete_item — actions {{fetch: list_items, create: add_item, delete: delete_item}}
+- Game: operations get_board, make_move, reset_game — actions {{load: get_board, move: make_move, reset: reset_game}}
+
 Custom UI rules:
 - No external CDN scripts; index.html MUST load /static/skill-sdk.js
 - Use AdaSkill singleton — do NOT use `new AdaSkill()`
 - AdaSkill.init() once at startup
 - AdaSkill.call('operation_name', {{{{ param: value }}}}) — first arg is action string, second is params
-- AdaSkill.getData() returns {{{{ records: [...] }}}} for rendering
-- Refresh UI after mutations via getData() or onDataChanged
+- AdaSkill.getData() returns {{{{ records: [...] }}}} when persistence uses records — optional for stateful UIs
+- Refresh UI after mutations via getData(), onDataChanged, or local optimistic state
 
 app.js scaffold (fill in DOM rendering and operation names):
 ```
@@ -232,10 +244,10 @@ app.js scaffold (fill in DOM rendering and operation names):
 ```
 
 Interactive tool rules:
-- Persist data to Path(__file__).parent / "skill_data" / "{{tool_name}}.json"
-- Store shape: {{{{"records": [...]}}}}
+- Persist data to Path(__file__).parent / "skill_data" / "{{tool_name}}.json" when needed
+- Use any JSON shape appropriate (typically {{{{"records": [...]}}}} or a single state object in records[0])
 - manifest.operations must match run(action=...) enum
-- Interactive tests use real /workspace/skill_data/ CRUD
+- test_code exercises each operation via run(action=...)
 
 """ + _COMMON_CODEGEN_RULES
 
@@ -305,12 +317,10 @@ Respond with ONLY valid JSON (no markdown fences):
 Review checklist:
 - manifest.kind is "interactive"
 - manifest.operations match run(action=...) enum in tool_code
-- manifest.ui.actions map create/delete/toggle to real operations
-- Record field names align with manifest.ui title_field, done_field, date_field
+- manifest.ui.actions: any key names allowed; each value must be in manifest.operations
 - For custom template: index.html loads /static/skill-sdk.js; app.js uses AdaSkill.init() not new AdaSkill()
-- For custom template: AdaSkill.call uses string action as first arg; UI refreshes via getData()
-- For built-in templates: ui_files must be empty
-- test_code tests real skill_data CRUD under /workspace/skill_data/
+- AdaSkill.call uses string action as first arg; getData() is optional
+- For legacy built-in templates (list/calendar/table): ui_files must be empty
 - Button/form wiring in custom app.js is plausible (handlers attached, not dead code)"""
 
 _DEFAULT_FORGE_FIX_PREVIEW_PROMPT = """You fix an interactive skill that failed automated preview QA (static UI lint, API contract test, or review issues).
@@ -324,8 +334,8 @@ Rules:
 - Preserve tool_name as the module filename stem
 - Fix every listed issue
 - manifest.kind must remain "interactive"
-- For custom template: fix app.js SDK usage; include full ui_files
-- For built-in templates: ui_files must be {{}}
+- For custom template: preserve arbitrary manifest.ui.actions keys; fix app.js SDK usage; include full ui_files
+- For legacy built-in templates: ui_files must be {{}}
 - test_code loads from /workspace/{tool_name}.py; use Python True/False/None
 - ALL file paths in run() return values use /workspace/ prefix"""
 
@@ -361,14 +371,16 @@ Custom UI SDK checklist:
 - index.html loads /static/skill-sdk.js
 - AdaSkill.init() — do NOT use `new AdaSkill()`
 - AdaSkill.call('operation', {{ params }}) — first arg is string action name
-- Refresh list via AdaSkill.getData().records after mutations
-- Wire click handlers to buttons; handle errors with console.error or alert
+- manifest.ui.actions keys may be any names; values must match manifest.operations
+- Wire click handlers to buttons; refresh via getData(), onDataChanged, or local state
+- Handle errors with console.error or alert
 
 Rules:
 - Preserve tool_name as the module filename stem
 - manifest.kind must remain "interactive"; template must stay "custom"
+- Preserve manifest.ui.actions key names unless the user asks to change them
 - manifest.operations must match run(action=...) enum values
-- Persist to Path(__file__).parent / "skill_data" / "{tool_name}.json"
+- Persist to Path(__file__).parent / "skill_data" / "{tool_name}.json" when needed
 - In tool_code use Python True, False, None — never JSON true/false/null
 - ALL file paths in run() return values use /workspace/ prefix"""
 
@@ -586,6 +598,13 @@ def _apply_stale_prompt_replacements(config: PromptsConfig) -> tuple[PromptsConf
         "fixing sandbox test failures",
         "runs in sandbox at /workspace",
         "UI templates: calendar (scheduling), list (todos/notes), table (generic CRUD).",
+        "Use calendar, list, or table templates when they fit CRUD record apps",
+        "ui.freeform: true",
+        "CRUD custom app (notes, file browser)",
+        "Freeform custom app (stopwatch",
+        "When manifest.ui.freeform is NOT true",
+        "For non-CRUD control/state apps (stopwatch",
+        "For non-CRUD apps (stopwatch, counter, timer, game, control panel)",
         "For headless-only tools, set \"manifest\": null or {\"kind\": \"headless\"}.",
         "You are an expert Python developer building tools for a self-improving AI agent.",
         "Include manifest when the skill is interactive (see forge code prompt for manifest shape).",

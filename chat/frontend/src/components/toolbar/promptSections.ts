@@ -102,7 +102,7 @@ export const PROMPT_GROUPS: PromptGroup[] = [
     id: 'forge-code',
     title: 'Forge master — code generation',
     description:
-      'Routed by skill kind at build time: headless, interactive built-in (list/calendar/table), or interactive custom (iframe).',
+      'Routed by skill kind at build time: headless or interactive custom (iframe). Legacy built-in templates remain for editing old skills.',
     sections: [
       {
         key: 'forge_code_headless_prompt',
@@ -113,15 +113,15 @@ export const PROMPT_GROUPS: PromptGroup[] = [
       },
       {
         key: 'forge_code_interactive_builtin_prompt',
-        label: 'Generate interactive (built-in UI)',
-        hint: 'List, calendar, or table — manifest + ui.actions, no ui_files.',
+        label: 'Generate interactive (legacy built-in UI)',
+        hint: 'Legacy only — list/calendar/table for editing old skills. New builds use custom iframe.',
         rows: 10,
         effectiveKey: 'forge_code_interactive_builtin',
       },
       {
         key: 'forge_code_interactive_custom_prompt',
         label: 'Generate interactive (custom iframe)',
-        hint: 'Custom HTML/CSS/JS with AdaSkill SDK scaffold.',
+        hint: 'Default for new interactive skills — custom HTML/CSS/JS with AdaSkill SDK.',
         rows: 12,
         effectiveKey: 'forge_code_interactive_custom',
       },
@@ -134,8 +134,8 @@ export const PROMPT_GROUPS: PromptGroup[] = [
       },
       {
         key: 'forge_edit_code_interactive_builtin_prompt',
-        label: 'Edit interactive (built-in UI)',
-        hint: 'Updates list/calendar/table skills.',
+        label: 'Edit interactive (legacy built-in UI)',
+        hint: 'Legacy only — updates list/calendar/table skills.',
         rows: 8,
         effectiveKey: 'forge_edit_code_interactive_builtin',
       },
@@ -169,8 +169,8 @@ export const PROMPT_GROUPS: PromptGroup[] = [
       },
       {
         key: 'forge_revise_preview_builtin_prompt',
-        label: 'Revise preview (built-in UI)',
-        hint: 'User-requested changes for list/calendar/table apps.',
+        label: 'Revise preview (legacy built-in UI)',
+        hint: 'Legacy only — user-requested changes for list/calendar/table apps.',
         rows: 8,
         effectiveKey: 'forge_revise_preview_builtin',
       },

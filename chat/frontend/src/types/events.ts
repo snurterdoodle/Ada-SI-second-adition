@@ -11,19 +11,14 @@ export type SkillUiField = {
 
 export type SkillUiConfig = {
   template: 'calendar' | 'list' | 'table' | 'custom'
+  freeform?: boolean
   entry?: string
   title_field?: string
   date_field?: string
   end_date_field?: string
   done_field?: string
   fields?: SkillUiField[]
-  actions?: {
-    fetch?: string
-    create?: string
-    delete?: string
-    toggle?: string
-    update?: string
-  }
+  actions?: Record<string, string | undefined>
 }
 
 export type ToolSummary = {

@@ -8,7 +8,12 @@ def test_infer_headless_from_plan():
     assert infer_codegen_profile(plan) == "headless"
 
 
-def test_infer_builtin_list_from_plan():
+def test_infer_custom_from_interactive_plan():
+    plan = "Interactive todo app. Operations: list_tasks, add_task."
+    assert infer_codegen_profile(plan) == "interactive_custom"
+
+
+def test_infer_builtin_only_when_plan_specifies_legacy_template():
     plan = "Interactive todo app. Template: list. Operations: list_tasks, add_task."
     assert infer_codegen_profile(plan) == "interactive_builtin"
 
@@ -35,7 +40,8 @@ def test_infer_revise_profile():
 
 if __name__ == "__main__":
     test_infer_headless_from_plan()
-    test_infer_builtin_list_from_plan()
+    test_infer_custom_from_interactive_plan()
+    test_infer_builtin_only_when_plan_specifies_legacy_template()
     test_infer_custom_from_plan()
     test_infer_from_manifest_edit_flow()
     test_infer_revise_profile()

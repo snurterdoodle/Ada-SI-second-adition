@@ -67,6 +67,11 @@ def _find_operation(operations: list[str], *needles: str) -> str | None:
     return None
 
 
+def _is_custom_ui(manifest: dict) -> bool:
+    ui = manifest.get("ui") or {}
+    return ui.get("template") == "custom"
+
+
 def normalize_interactive_manifest(manifest: dict, tool_name: str) -> dict:
     """Fill missing interactive manifest fields the forge often omits."""
     if manifest.get("kind") != "interactive":
@@ -79,6 +84,9 @@ def normalize_interactive_manifest(manifest: dict, tool_name: str) -> dict:
 
     ui = manifest.get("ui")
     if not isinstance(ui, dict):
+        return manifest
+
+    if _is_custom_ui(manifest):
         return manifest
 
     template = ui.get("template", "list")
@@ -129,6 +137,7 @@ def validate_manifest(manifest: dict, tool_name: str) -> tuple[bool, str]:
     template = ui.get("template", "")
     if template not in VALID_UI_TEMPLATES:
         return False, f"manifest.ui.template must be one of {sorted(VALID_UI_TEMPLATES)}."
+    custom = _is_custom_ui(manifest)
     if template == "custom":
         entry = ui.get("entry", "index.html")
         if not isinstance(entry, str) or not entry.strip():
@@ -144,7 +153,10 @@ def validate_manifest(manifest: dict, tool_name: str) -> tuple[bool, str]:
         return False, "Interactive skills require manifest.operations list."
     operations_set = {str(op) for op in operations}
     for key, action_name in actions.items():
-        if key not in UI_ACTION_KEYS:
+        if custom:
+            if not isinstance(key, str) or not key.strip():
+                return False, "manifest.ui.actions keys must be non-empty strings."
+        elif key not in UI_ACTION_KEYS:
             return False, f"Unknown manifest.ui.actions key: {key!r}"
         if not isinstance(action_name, str) or not action_name.strip():
             return False, f"manifest.ui.actions.{key} must be a non-empty string."
@@ -153,11 +165,13 @@ def validate_manifest(manifest: dict, tool_name: str) -> tuple[bool, str]:
                 False,
                 f"manifest.ui.actions.{key} ({action_name!r}) must be listed in manifest.operations.",
             )
+    if custom and not actions:
+        return False, "Custom interactive skills require at least one manifest.ui.actions entry."
     template_required = {
         "list": {"create", "delete", "toggle"},
         "calendar": {"create", "delete"},
         "table": {"create", "delete"},
-        "custom": {"create", "delete"},
+        "custom": set(),
     }
     required = template_required.get(template, set())
     missing = required - set(actions.keys())
@@ -237,8 +251,10 @@ def validate_ui_js(
         r"\bskill\.call\s*\(\s*\{", app_js
     ):
         return False, "Use AdaSkill.call('action_name', { params }) — action must be a string."
-    if "AdaSkill.init" not in app_js and "getData" not in app_js:
-        return False, "app.js must call AdaSkill.init() and use getData() to load records."
+    if "AdaSkill.init" not in app_js:
+        return False, "app.js must call AdaSkill.init()."
+    if not re.search(r"\bAdaSkill\.call\s*\(", app_js) and "getData" not in app_js:
+        return False, "app.js must call AdaSkill.call() or use getData()."
     return True, ""
 
 
@@ -386,6 +402,75 @@ def _delete_id_param(mod, delete_action: str, operations: list[str], template: s
     return _id_param_for_delete(operations, template)
 
 
+def _contract_minimal_params(mod) -> dict[str, str]:
+    params: dict[str, str] = {}
+    for key in _tool_schema_required(mod):
+        if key == "action":
+            continue
+        params[key] = _sample_value_for_field(key)
+    return params
+
+
+def _verify_crud_contract(
+    mod,
+    manifest: dict,
+    data_path: Path,
+    actions: dict,
+    operations: list[str],
+    template: str,
+) -> tuple[bool, str]:
+    create_action = actions.get("create")
+    delete_action = actions.get("delete")
+    fetch_action = actions.get("fetch")
+    created_id: str | None = None
+
+    if create_action:
+        params: dict = {"action": create_action}
+        params.update(_contract_create_params(mod, manifest))
+        result = mod.run(**params)
+        if isinstance(result, dict) and result.get("error"):
+            return False, f"create action {create_action!r} failed: {result['error']}"
+        data = json.loads(data_path.read_text(encoding="utf-8"))
+        records = data.get("records", [])
+        if not records:
+            return False, f"create action {create_action!r} did not persist a record."
+        last = records[-1]
+        created_id = str(last.get("id", "")) or None
+
+    if fetch_action:
+        result = mod.run(action=fetch_action)
+        if isinstance(result, dict) and result.get("error"):
+            return False, f"fetch action {fetch_action!r} failed: {result['error']}"
+
+    if delete_action and created_id:
+        id_key = _delete_id_param(mod, delete_action, operations, template)
+        result = mod.run(action=delete_action, **{id_key: created_id})
+        if isinstance(result, dict) and result.get("error"):
+            return False, f"delete action {delete_action!r} failed: {result['error']}"
+        data = json.loads(data_path.read_text(encoding="utf-8"))
+        if data.get("records"):
+            return False, f"delete action {delete_action!r} did not remove the record."
+
+    return True, "API contract tests passed."
+
+
+def _verify_freeform_contract(mod, actions: dict) -> tuple[bool, str]:
+    minimal = _contract_minimal_params(mod)
+    seen: set[str] = set()
+    for action_name in actions.values():
+        op = str(action_name).strip()
+        if not op or op in seen:
+            continue
+        seen.add(op)
+        params = {"action": op, **minimal}
+        result = mod.run(**params)
+        if isinstance(result, dict) and result.get("error"):
+            return False, f"action {op!r} failed: {result['error']}"
+    if not seen:
+        return False, "Freeform contract test found no operations to exercise."
+    return True, "API contract tests passed."
+
+
 def verify_skill_api_contract(
     tool_name: str,
     tool_code: str,
@@ -427,39 +512,11 @@ def verify_skill_api_contract(
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
 
-            create_action = actions.get("create")
-            delete_action = actions.get("delete")
-            fetch_action = actions.get("fetch")
-            created_id: str | None = None
-
-            if create_action:
-                params: dict = {"action": create_action}
-                params.update(_contract_create_params(mod, manifest))
-                result = mod.run(**params)
-                if isinstance(result, dict) and result.get("error"):
-                    return False, f"create action {create_action!r} failed: {result['error']}"
-                data = json.loads(data_path.read_text(encoding="utf-8"))
-                records = data.get("records", [])
-                if not records:
-                    return False, f"create action {create_action!r} did not persist a record."
-                last = records[-1]
-                created_id = str(last.get("id", "")) or None
-
-            if fetch_action:
-                result = mod.run(action=fetch_action)
-                if isinstance(result, dict) and result.get("error"):
-                    return False, f"fetch action {fetch_action!r} failed: {result['error']}"
-
-            if delete_action and created_id:
-                id_key = _delete_id_param(mod, delete_action, operations, template)
-                result = mod.run(action=delete_action, **{id_key: created_id})
-                if isinstance(result, dict) and result.get("error"):
-                    return False, f"delete action {delete_action!r} failed: {result['error']}"
-                data = json.loads(data_path.read_text(encoding="utf-8"))
-                if data.get("records"):
-                    return False, f"delete action {delete_action!r} did not remove the record."
-
-            return True, "API contract tests passed."
+            if _is_custom_ui(manifest):
+                return _verify_freeform_contract(mod, actions)
+            return _verify_crud_contract(
+                mod, manifest, data_path, actions, operations, template
+            )
     except Exception as exc:
         return False, f"API contract test error: {exc}"
 
