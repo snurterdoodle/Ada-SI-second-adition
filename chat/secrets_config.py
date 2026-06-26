@@ -20,10 +20,16 @@ SUPPORTED_SECRET_KEYS = frozenset(
     }
 )
 
+# Keys already in the process environment at import time (e.g. from .env via start.ps1).
+_STARTUP_ENV_KEYS: frozenset[str] = frozenset(
+    name for name in SUPPORTED_SECRET_KEYS if os.environ.get(name, "").strip()
+)
+
 
 class SecretStatus(TypedDict):
     configured: bool
     hint: str
+    source: str
 
 
 def _ensure_config_dir() -> None:
@@ -90,10 +96,22 @@ def get_effective_secret(name: str) -> str:
 
 
 def apply_secrets_to_environ() -> None:
-    """Fill missing os.environ entries from secrets file (.env takes precedence)."""
-    for name, value in load_secrets_raw().items():
-        if not os.environ.get(name, "").strip():
-            os.environ[name] = value
+    """Sync UI-managed secrets with os.environ.
+
+    Keys that were present in the environment at process start (.env) are never
+  unset by the UI. Keys saved only via Settings are removed from os.environ when
+  cleared from secrets.json.
+    """
+    stored = load_secrets_raw()
+    for name in SUPPORTED_SECRET_KEYS:
+        if name in _STARTUP_ENV_KEYS:
+            if not os.environ.get(name, "").strip() and name in stored:
+                os.environ[name] = stored[name]
+            continue
+        if name in stored:
+            os.environ[name] = stored[name]
+        else:
+            os.environ.pop(name, None)
 
 
 def secrets_status_response() -> dict[str, SecretStatus]:
@@ -103,8 +121,11 @@ def secrets_status_response() -> dict[str, SecretStatus]:
         env_value = os.environ.get(name, "").strip()
         file_value = stored.get(name, "")
         effective = env_value or file_value
+        from_env = bool(env_value)
+        from_file = bool(file_value)
         result[name] = {
             "configured": bool(effective),
             "hint": _mask_value(effective) if effective else "",
+            "source": "env" if from_env else ("file" if from_file else ""),
         }
     return result

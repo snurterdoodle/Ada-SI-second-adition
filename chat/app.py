@@ -2433,7 +2433,7 @@ async def revise_preview(request: Request, payload: dict = Body(...)) -> Streami
         )
 
         with forge_google_search_context(forge_search):
-            sandbox_success, log_output, test_code, tool_code, sandbox_notices = (
+            sandbox_success, log_output, test_code, tool_code, updated_requirements, sandbox_notices = (
                 await run_sandbox_phase(
                     run_id=run_id,
                     tool_name=tool_name,
@@ -2452,6 +2452,7 @@ async def revise_preview(request: Request, payload: dict = Body(...)) -> Streami
                     reasoning_effort=reasoning_effort,
                 )
             )
+        preview_data["requirements"] = updated_requirements
         for level, message in sandbox_notices:
             yield blog(message, level=level)
         log_sandbox(

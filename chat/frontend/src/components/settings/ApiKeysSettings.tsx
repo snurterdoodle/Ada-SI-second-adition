@@ -123,12 +123,17 @@ export function ApiKeysSettings() {
         {SECRET_FIELDS.map(({ key, label, hint }) => {
           const configured = status[key]?.configured ?? false
           const maskedHint = status[key]?.hint ?? ''
+          const source = status[key]?.source ?? ''
+          const clearable = configured && source !== 'env'
           return (
             <div className="settings-field" key={key}>
               <label htmlFor={`secret-${key}`}>{label}</label>
               <p className="forger-guidance-hint">{hint}</p>
               {configured ? (
-                <p className="forger-guidance-hint">Configured: {maskedHint}</p>
+                <p className="forger-guidance-hint">
+                  Configured: {maskedHint}
+                  {source === 'env' ? ' (from .env)' : source === 'file' ? ' (saved in Settings)' : ''}
+                </p>
               ) : (
                 <p className="forger-guidance-hint">Not configured</p>
               )}
@@ -144,7 +149,7 @@ export function ApiKeysSettings() {
                   setDrafts((current) => ({ ...current, [key]: event.target.value }))
                 }
               />
-              {configured ? (
+              {clearable ? (
                 <button
                   type="button"
                   className="btn-secondary btn-sm settings-inline-btn"
@@ -153,6 +158,10 @@ export function ApiKeysSettings() {
                 >
                   Clear saved key
                 </button>
+              ) : source === 'env' ? (
+                <p className="forger-guidance-hint">
+                  This key comes from your .env file. Remove it there and restart Ada-SI to clear.
+                </p>
               ) : null}
             </div>
           )

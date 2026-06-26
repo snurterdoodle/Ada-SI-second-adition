@@ -159,6 +159,21 @@ def test_normalize_interactive_manifest_infers_list_actions():
     assert manifest["ui"]["actions"]["toggle"] == "complete_task"
 
 
+def test_normalize_interactive_manifest_infers_operations_from_custom_actions():
+    manifest = {
+        "kind": "interactive",
+        "ui": {
+            "template": "custom",
+            "entry": "index.html",
+            "actions": {"getStats": "get_stats"},
+        },
+    }
+    tools_engine.normalize_interactive_manifest(manifest, "system_monitor")
+    ok, reason = tools_engine.validate_manifest(manifest, "system_monitor")
+    assert ok, reason
+    assert manifest["operations"] == ["get_stats"]
+
+
 def test_validate_ui_js_rejects_new_ada_skill():
     manifest = {
         "kind": "interactive",
@@ -230,6 +245,7 @@ if __name__ == "__main__":
     test_write_and_resolve_ui_files()
     test_tool_artifact_paths_includes_ui_dir()
     test_normalize_interactive_manifest_infers_list_actions()
+    test_normalize_interactive_manifest_infers_operations_from_custom_actions()
     test_validate_ui_js_rejects_new_ada_skill()
     test_validate_ui_js_accepts_good_pattern()
     test_validate_ui_js_custom_allows_call_without_getdata()

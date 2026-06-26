@@ -51,6 +51,7 @@ export type SecretKey =
 export type SecretStatus = {
   configured: boolean
   hint: string
+  source?: '' | 'env' | 'file'
 }
 
 export type SecretsStatusMap = Partial<Record<SecretKey, SecretStatus>>

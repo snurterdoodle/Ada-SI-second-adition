@@ -4,12 +4,16 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable
 
+from build_pipeline import PHASE_MAX_RETRIES
 from tool_creator import fix_preview_issues, review_interactive_preview
-from tools_engine import validate_ui_files, verify_skill_api_contract
+from tool_verify import verify_skill_api_contract_in_ephemeral_venv
+from tools_engine import validate_ui_files
 
 StepFn = Callable[..., str]
 BlogFn = Callable[..., str]
 CancelledFn = Callable[[], Awaitable[bool]]
+
+YieldItem = tuple[str, bool, str, str, list[str], dict | None, dict[str, str] | None]
 
 
 async def stream_interactive_ui_qa(
@@ -18,6 +22,7 @@ async def stream_interactive_ui_qa(
     tool_name: str,
     tool_code: str,
     test_code: str,
+    requirements: list[str],
     manifest: dict | None,
     ui_files: dict[str, str] | None,
     creator_model: str,
@@ -28,52 +33,54 @@ async def stream_interactive_ui_qa(
     phase: StepFn,
     blog: BlogFn,
     cancelled: CancelledFn,
-) -> AsyncIterator[tuple[str, bool, str, str, dict | None, dict[str, str] | None]]:
-    """Yield (sse_event, done, tool_code, test_code, manifest, ui_files)."""
+) -> AsyncIterator[YieldItem]:
+    """Yield (sse_event, done, tool_code, test_code, requirements, manifest, ui_files)."""
     if not manifest or manifest.get("kind") != "interactive":
-        yield ("", True, tool_code, test_code, manifest, ui_files)
+        yield ("", True, tool_code, test_code, requirements, manifest, ui_files)
         return
 
     current_tool = tool_code
     current_test = test_code
     current_manifest = manifest
     current_ui = ui_files
-    fix_attempted = False
+    current_requirements = list(requirements)
+
+    ui_fix_attempts = 0
+    contract_fix_attempts = 0
+    review_fix_attempts = 0
+
+    def state(
+        event: str = "",
+        done: bool = False,
+    ) -> YieldItem:
+        return (
+            event,
+            done,
+            current_tool,
+            current_test,
+            current_requirements,
+            current_manifest,
+            current_ui,
+        )
 
     while True:
         if await cancelled():
-            yield ("", False, current_tool, current_test, current_manifest, current_ui)
+            yield state(done=False)
             return
 
-        yield (
-            step("validate_ui", "Validating app UI", "active"),
-            False,
-            current_tool,
-            current_test,
-            current_manifest,
-            current_ui,
-        )
-        yield (phase("validate_ui", "active"), False, current_tool, current_test, current_manifest, current_ui)
-        yield (
-            blog("Validating interactive UI files and SDK usage…"),
-            False,
-            current_tool,
-            current_test,
-            current_manifest,
-            current_ui,
-        )
+        yield state(step("validate_ui", "Validating app UI", "active"))
+        yield state(phase("validate_ui", "active"))
+        yield state(blog("Validating interactive UI files and SDK usage…"))
 
         ui_ok, ui_reason = validate_ui_files(current_ui, current_manifest, tool_name)
         if not ui_ok:
-            if not fix_attempted:
-                fix_attempted = True
-                yield (
-                    blog(f"UI validation failed — auto-fixing: {ui_reason}", level="warn"),
-                    False,
-                    current_tool,
-                    current_test,
-                    current_manifest,
-                    current_ui,
+            if ui_fix_attempts < PHASE_MAX_RETRIES:
+                ui_fix_attempts += 1
+                yield state(
+                    blog(
+                        f"UI validation failed — auto-fixing (attempt {ui_fix_attempts}): {ui_reason}",
+                        level="warn",
+                    )
                 )
                 try:
                     (
@@ -96,68 +103,36 @@ async def stream_interactive_ui_qa(
                     )
                     continue
                 except Exception as exc:
-                    yield (
-                        step("validate_ui", "Validating app UI", "error", detail=str(exc)[:200]),
-                        False,
-                        current_tool,
-                        current_test,
-                        current_manifest,
-                        current_ui,
-                    )
-                    yield ("", False, current_tool, current_test, current_manifest, current_ui)
+                    yield state(step("validate_ui", "Validating app UI", "error", detail=str(exc)[:200]))
+                    yield state(done=False)
                     return
-            yield (
-                step("validate_ui", "Validating app UI", "error", detail=ui_reason[:200]),
-                False,
-                current_tool,
-                current_test,
-                current_manifest,
-                current_ui,
-            )
-            yield ("", False, current_tool, current_test, current_manifest, current_ui)
+            yield state(step("validate_ui", "Validating app UI", "error", detail=ui_reason[:200]))
+            yield state(done=False)
             return
 
-        yield (
-            step("validate_ui", "Validating app UI", "done"),
-            False,
-            current_tool,
-            current_test,
-            current_manifest,
-            current_ui,
-        )
-        yield (phase("validate_ui", "done"), False, current_tool, current_test, current_manifest, current_ui)
+        yield state(step("validate_ui", "Validating app UI", "done"))
+        yield state(phase("validate_ui", "done"))
 
-        yield (
-            step("contract_test", "Testing skill API contract", "active"),
-            False,
-            current_tool,
-            current_test,
-            current_manifest,
-            current_ui,
-        )
-        yield (phase("contract_test", "active"), False, current_tool, current_test, current_manifest, current_ui)
-        yield (
-            blog("Running API contract tests for interactive actions…"),
-            False,
-            current_tool,
-            current_test,
-            current_manifest,
-            current_ui,
-        )
+        yield state(step("contract_test", "Testing skill API contract", "active"))
+        yield state(phase("contract_test", "active"))
+        yield state(blog("Running API contract tests for interactive actions…"))
 
-        contract_ok, contract_reason = verify_skill_api_contract(
-            tool_name, current_tool, current_manifest
+        contract_ok, contract_reason, current_requirements = (
+            verify_skill_api_contract_in_ephemeral_venv(
+                tool_name,
+                current_tool,
+                current_manifest,
+                current_requirements,
+            )
         )
         if not contract_ok:
-            if not fix_attempted:
-                fix_attempted = True
-                yield (
-                    blog(f"Contract test failed — auto-fixing: {contract_reason}", level="warn"),
-                    False,
-                    current_tool,
-                    current_test,
-                    current_manifest,
-                    current_ui,
+            if contract_fix_attempts < PHASE_MAX_RETRIES:
+                contract_fix_attempts += 1
+                yield state(
+                    blog(
+                        f"Contract test failed — auto-fixing (attempt {contract_fix_attempts}): {contract_reason}",
+                        level="warn",
+                    )
                 )
                 try:
                     (
@@ -180,59 +155,33 @@ async def stream_interactive_ui_qa(
                     )
                     continue
                 except Exception as exc:
-                    yield (
+                    yield state(
                         step(
                             "contract_test",
                             "Testing skill API contract",
                             "error",
                             detail=str(exc)[:200],
-                        ),
-                        False,
-                        current_tool,
-                        current_test,
-                        current_manifest,
-                        current_ui,
+                        )
                     )
-                    yield ("", False, current_tool, current_test, current_manifest, current_ui)
+                    yield state(done=False)
                     return
-            yield (
-                step("contract_test", "Testing skill API contract", "error", detail=contract_reason[:200]),
-                False,
-                current_tool,
-                current_test,
-                current_manifest,
-                current_ui,
+            yield state(
+                step(
+                    "contract_test",
+                    "Testing skill API contract",
+                    "error",
+                    detail=contract_reason[:200],
+                )
             )
-            yield ("", False, current_tool, current_test, current_manifest, current_ui)
+            yield state(done=False)
             return
 
-        yield (
-            step("contract_test", "Testing skill API contract", "done"),
-            False,
-            current_tool,
-            current_test,
-            current_manifest,
-            current_ui,
-        )
-        yield (phase("contract_test", "done"), False, current_tool, current_test, current_manifest, current_ui)
+        yield state(step("contract_test", "Testing skill API contract", "done"))
+        yield state(phase("contract_test", "done"))
 
-        yield (
-            step("preview_review", "Automated app review", "active"),
-            False,
-            current_tool,
-            current_test,
-            current_manifest,
-            current_ui,
-        )
-        yield (phase("preview_review", "active"), False, current_tool, current_test, current_manifest, current_ui)
-        yield (
-            blog("Running automated preview review…"),
-            False,
-            current_tool,
-            current_test,
-            current_manifest,
-            current_ui,
-        )
+        yield state(step("preview_review", "Automated app review", "active"))
+        yield state(phase("preview_review", "active"))
+        yield state(blog("Running automated preview review…"))
 
         review_ok, review_issues = await review_interactive_preview(
             tool_name,
@@ -247,16 +196,14 @@ async def stream_interactive_ui_qa(
             reasoning_effort=reasoning_effort,
         )
         if not review_ok:
-            if not fix_attempted:
-                fix_attempted = True
+            if review_fix_attempts < PHASE_MAX_RETRIES:
+                review_fix_attempts += 1
                 summary = "; ".join(review_issues) or "Preview review failed."
-                yield (
-                    blog(f"Preview review flagged issues — auto-fixing: {summary}", level="warn"),
-                    False,
-                    current_tool,
-                    current_test,
-                    current_manifest,
-                    current_ui,
+                yield state(
+                    blog(
+                        f"Preview review flagged issues — auto-fixing (attempt {review_fix_attempts}): {summary}",
+                        level="warn",
+                    )
                 )
                 try:
                     (
@@ -279,44 +226,18 @@ async def stream_interactive_ui_qa(
                     )
                     continue
                 except Exception as exc:
-                    yield (
-                        step("preview_review", "Automated app review", "error", detail=str(exc)[:200]),
-                        False,
-                        current_tool,
-                        current_test,
-                        current_manifest,
-                        current_ui,
+                    yield state(
+                        step("preview_review", "Automated app review", "error", detail=str(exc)[:200])
                     )
-                    yield ("", False, current_tool, current_test, current_manifest, current_ui)
+                    yield state(done=False)
                     return
             summary = "; ".join(review_issues) or "Preview review failed."
-            yield (
-                step("preview_review", "Automated app review", "error", detail=summary[:200]),
-                False,
-                current_tool,
-                current_test,
-                current_manifest,
-                current_ui,
-            )
-            yield ("", False, current_tool, current_test, current_manifest, current_ui)
+            yield state(step("preview_review", "Automated app review", "error", detail=summary[:200]))
+            yield state(done=False)
             return
 
-        yield (
-            step("preview_review", "Automated app review", "done"),
-            False,
-            current_tool,
-            current_test,
-            current_manifest,
-            current_ui,
-        )
-        yield (phase("preview_review", "done"), False, current_tool, current_test, current_manifest, current_ui)
-        yield (
-            blog("Automated preview review passed."),
-            False,
-            current_tool,
-            current_test,
-            current_manifest,
-            current_ui,
-        )
-        yield ("", True, current_tool, current_test, current_manifest, current_ui)
+        yield state(step("preview_review", "Automated app review", "done"))
+        yield state(phase("preview_review", "done"))
+        yield state(blog("Automated preview review passed."))
+        yield state(done=True)
         return

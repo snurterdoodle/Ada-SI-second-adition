@@ -351,7 +351,7 @@ async def stream_tool_build(
     def tagged_sse(payload: dict) -> str:
         return emit(payload)
 
-    sandbox_success, log_output, test_code, tool_code, sandbox_notices = await run_sandbox_phase(
+    sandbox_success, log_output, test_code, tool_code, requirements, sandbox_notices = await run_sandbox_phase(
         run_id=run_id,
         tool_name=tool_name,
         tool_code=tool_code,
@@ -400,11 +400,12 @@ async def stream_tool_build(
     yield blog("Verification tests passed.")
 
     qa_passed = False
-    async for event, done, new_tool, new_test, new_manifest, new_ui in stream_interactive_ui_qa(
+    async for event, done, new_tool, new_test, new_requirements, new_manifest, new_ui in stream_interactive_ui_qa(
         run_id=run_id,
         tool_name=tool_name,
         tool_code=tool_code,
         test_code=test_code,
+        requirements=requirements,
         manifest=manifest,
         ui_files=ui_files,
         creator_model=creator_model,
@@ -425,6 +426,7 @@ async def stream_tool_build(
             qa_passed = True
             tool_code = new_tool
             test_code = new_test
+            requirements = new_requirements
             manifest = new_manifest
             ui_files = new_ui
             break

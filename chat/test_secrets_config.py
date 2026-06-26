@@ -52,8 +52,32 @@ class SecretsConfigTests(unittest.TestCase):
     def test_apply_secrets_fills_missing_env(self) -> None:
         sc.save_secrets_raw({"ELEVENLABS_API_KEY": "el-key"})
         with patch.dict(os.environ, {}, clear=True):
-            sc.apply_secrets_to_environ()
-            self.assertEqual(os.environ.get("ELEVENLABS_API_KEY"), "el-key")
+            with patch.object(sc, "_STARTUP_ENV_KEYS", frozenset()):
+                sc.apply_secrets_to_environ()
+                self.assertEqual(os.environ.get("ELEVENLABS_API_KEY"), "el-key")
+
+    def test_clear_secret_unsets_env_for_ui_saved_keys(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            with patch.object(sc, "_STARTUP_ENV_KEYS", frozenset()):
+                sc.save_secrets_raw({"OPENAI_API_KEY": "sk-ui-key"})
+                sc.apply_secrets_to_environ()
+                self.assertTrue(sc.secrets_status_response()["OPENAI_API_KEY"]["configured"])
+                sc.clear_secret("OPENAI_API_KEY")
+                sc.apply_secrets_to_environ()
+                status = sc.secrets_status_response()["OPENAI_API_KEY"]
+                self.assertFalse(status["configured"])
+                self.assertEqual(os.environ.get("OPENAI_API_KEY"), None)
+
+    def test_clear_secret_keeps_env_when_from_dotenv(self) -> None:
+        sc.save_secrets_raw({"GEMINI_API_KEY": "file-key"})
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "env-key"}, clear=False):
+            with patch.object(sc, "_STARTUP_ENV_KEYS", frozenset({"GEMINI_API_KEY"})):
+                sc.clear_secret("GEMINI_API_KEY")
+                sc.apply_secrets_to_environ()
+                status = sc.secrets_status_response()["GEMINI_API_KEY"]
+                self.assertTrue(status["configured"])
+                self.assertEqual(status["source"], "env")
+                self.assertEqual(os.environ.get("GEMINI_API_KEY"), "env-key")
 
     def test_unsupported_key_raises(self) -> None:
         with self.assertRaises(ValueError):

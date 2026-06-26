@@ -1,5 +1,7 @@
 # Ada-SI
 
+**Repository:** [github.com/nazirlouis/Ada-SI](https://github.com/nazirlouis/Ada-SI)
+
 **Ada-SI** is a local-first, self-improving AI assistant platform. Chat with **Scout** (Ada) through a gamified interface, watch it forge new Python skills at runtime, and run interactive skill apps — all on your machine.
 
 The UI title is **ADA Chat**. Scout is the main agent; a separate **Forge master** agent plans, writes, tests, and installs new tools when Scout needs capabilities it does not yet have.
@@ -89,7 +91,7 @@ On Windows, the launcher looks for Python via `py -3.12`, `python3.12`, or `pyth
 1. **Clone the repository**
 
    ```powershell
-   git clone <your-repo-url>
+   git clone https://github.com/nazirlouis/Ada-SI.git
    cd Ada-SI
    ```
 
@@ -465,6 +467,8 @@ Ada-SI/
 
 ## Developer Reference
 
+Source: [https://github.com/nazirlouis/Ada-SI](https://github.com/nazirlouis/Ada-SI)
+
 ### Frontend Development
 
 ```powershell
@@ -651,7 +655,7 @@ Set `ADA_LOG_LEVEL=DEBUG` in `.env` for verbose stream logging.
 
 Ada-SI is released under the [MIT License](LICENSE).
 
-Copyright (c) 2026 Ada-SI contributors.
+Copyright (c) 2026 Ada-SI contributors. Source: [github.com/nazirlouis/Ada-SI](https://github.com/nazirlouis/Ada-SI).
 
 ### Third-Party / Open-Source Dependencies
 

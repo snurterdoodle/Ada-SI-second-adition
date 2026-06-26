@@ -9,8 +9,11 @@ from collections.abc import AsyncIterator
 from typing import Any, Callable
 
 from debug_log import log_build_event, log_pip_install, log_runtime_call
-from runtime_client import runtime_install_tool, runtime_pip_install
-from tool_verify import verify_tool_in_ephemeral_venv
+from runtime_client import normalize_requirements, runtime_install_tool, runtime_pip_install
+from tool_verify import (
+    augment_requirements_for_missing_module,
+    verify_tool_in_ephemeral_venv,
+)
 from tool_creator import (
     fix_runtime_failure,
     fix_test_code,
@@ -23,7 +26,7 @@ logger = logging.getLogger(__name__)
 PENDING_PIP_INSTALLS: dict[str, dict] = {}
 PENDING_UI_PREVIEWS: dict[str, dict] = {}
 PIP_TTL_SECONDS = 3600
-PHASE_MAX_RETRIES = 2
+PHASE_MAX_RETRIES = 3
 
 
 def cleanup_expired_pip_installs() -> None:
@@ -546,25 +549,40 @@ async def run_sandbox_phase(
     sse_data: Callable[[dict], str],
     cancelled: Callable[[], Any],
     reasoning_effort: str | None = None,
-) -> tuple[bool, str, str, str, list[tuple[str, str]]]:
+) -> tuple[bool, str, str, str, list[str], list[tuple[str, str]]]:
     """Run ephemeral venv verification with auto-retry."""
     log_output = ""
     current_test = test_code
     current_tool = tool_code
+    current_requirements = normalize_requirements(requirements)
     notices: list[tuple[str, str]] = []
     for attempt in range(PHASE_MAX_RETRIES):
         if await cancelled():
-            return False, log_output, current_test, current_tool, notices
+            return False, log_output, current_test, current_tool, current_requirements, notices
 
         success, log_output = verify_tool_in_ephemeral_venv(
             tool_name,
             current_tool,
             current_test,
-            requirements,
+            current_requirements,
             manifest=manifest,
         )
         if success:
-            return True, log_output, current_test, current_tool, notices
+            return True, log_output, current_test, current_tool, current_requirements, notices
+
+        updated, missing = augment_requirements_for_missing_module(
+            current_requirements,
+            log_output,
+        )
+        if missing and updated != current_requirements:
+            current_requirements = updated
+            notices.append(
+                (
+                    "warn",
+                    f"Missing module {missing!r} — installing in verify venv and retrying…",
+                )
+            )
+            continue
 
         if attempt < PHASE_MAX_RETRIES - 1:
             notices.append(
@@ -608,5 +626,5 @@ async def run_sandbox_phase(
                     attempt + 1,
                     exc,
                 )
-        return False, log_output, current_test, current_tool, notices
-    return False, log_output, current_test, current_tool, notices
+        return False, log_output, current_test, current_tool, current_requirements, notices
+    return False, log_output, current_test, current_tool, current_requirements, notices

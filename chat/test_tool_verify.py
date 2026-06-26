@@ -11,7 +11,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from tool_verify import (  # noqa: E402
     _seed_skill_data,
+    augment_requirements_for_missing_module,
+    parse_missing_module,
     rewrite_workspace_paths,
+    verify_skill_api_contract_in_ephemeral_venv,
     verify_tool_in_ephemeral_venv,
 )
 
@@ -50,6 +53,42 @@ if __name__ == "__main__":
     test_run()
     print("All tests passed.")
 '''
+
+
+def test_parse_missing_module():
+    assert parse_missing_module("API contract test error: No module named 'psutil'") == "psutil"
+    assert parse_missing_module('ModuleNotFoundError: No module named "requests.exceptions"') == "requests"
+    assert parse_missing_module("something else") is None
+
+
+def test_augment_requirements_for_missing_module():
+    updated, missing = augment_requirements_for_missing_module(
+        ["httpx"],
+        "No module named 'psutil'",
+    )
+    assert missing == "psutil"
+    assert "psutil" in updated
+    assert "httpx" in updated
+
+    same, missing_again = augment_requirements_for_missing_module(
+        updated,
+        "No module named 'psutil'",
+    )
+    assert missing_again is None
+    assert same == updated
+
+
+def test_verify_skill_api_contract_in_ephemeral_venv():
+    from test_skill_contract import LIST_TOOL, MANIFEST
+
+    ok, reason, reqs = verify_skill_api_contract_in_ephemeral_venv(
+        "contract_demo",
+        LIST_TOOL,
+        MANIFEST,
+        [],
+    )
+    assert ok, reason
+    assert reqs == []
 
 
 def test_seed_skill_data_creates_json():
@@ -141,6 +180,9 @@ def test_verify_stdlib_tool_success_and_cleanup():
 
 
 if __name__ == "__main__":
+    test_parse_missing_module()
+    test_augment_requirements_for_missing_module()
+    test_verify_skill_api_contract_in_ephemeral_venv()
     test_seed_skill_data_creates_json()
     test_rewrite_workspace_paths()
     test_verify_tool_with_workspace_return_assertion()

@@ -77,15 +77,37 @@ def normalize_interactive_manifest(manifest: dict, tool_name: str) -> dict:
     """Fill missing interactive manifest fields the forge often omits."""
     if manifest.get("kind") != "interactive":
         return manifest
-    operations = manifest.get("operations")
-    if not isinstance(operations, list) or not operations:
-        return manifest
-    ops = [str(op) for op in operations if str(op).strip()]
-    manifest["operations"] = ops
 
     ui = manifest.get("ui")
     if not isinstance(ui, dict):
+        ui = {}
+        manifest["ui"] = ui
+
+    operations = manifest.get("operations")
+    ops: list[str] = []
+    if isinstance(operations, list) and operations:
+        ops = [str(op) for op in operations if str(op).strip()]
+
+    if not ops:
+        actions = ui.get("actions")
+        if isinstance(actions, dict):
+            inferred_ops: list[str] = []
+            seen: set[str] = set()
+            for action_name in actions.values():
+                if not isinstance(action_name, str):
+                    continue
+                name = action_name.strip()
+                if name and name not in seen:
+                    seen.add(name)
+                    inferred_ops.append(name)
+            if inferred_ops:
+                ops = inferred_ops
+                manifest["operations"] = ops
+
+    if not ops:
         return manifest
+
+    manifest["operations"] = ops
 
     if _is_custom_ui(manifest):
         return manifest
