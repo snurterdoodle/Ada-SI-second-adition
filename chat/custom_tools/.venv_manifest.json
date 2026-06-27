@@ -1,15 +1,7 @@
 {
   "approved_packages": [
-    "GPUtil",
     "comtypes; sys_platform == 'win32'",
-    "duckduckgo-search",
-    "piper-tts>=1.2.0",
-    "psutil",
-    "pyautogui",
     "pycaw; sys_platform == 'win32'",
-    "pyttsx3>=2.90",
-    "requests>=2.31.0",
-    "sounddevice>=0.4.6",
-    "tzdata"
+    "requests"
   ]
 }

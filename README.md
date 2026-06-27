@@ -12,6 +12,10 @@ The UI title is **ADA Chat**. Scout is the main agent; a separate **Forge master
 - [Architecture](#architecture)
 - [Prerequisites](#prerequisites)
 - [Installation and Setup](#installation-and-setup)
+  - [Choose your install path](#choose-your-install-path)
+  - [Native install (Windows)](#native-install-windows)
+  - [Docker install (VPS / cross-platform)](#docker-install-vps--cross-platform)
+  - [VPS deployment](#vps-deployment)
 - [Configuration](#configuration)
 - [Using Ada-SI](#using-ada-si)
 - [Core Workflows](#core-workflows)
@@ -73,20 +77,41 @@ flowchart LR
 
 ## Prerequisites
 
+**Native install (Windows)**
+
 | Requirement | Version | Used for |
 |-------------|---------|----------|
 | **Python** | 3.12 | Chat server, tool runtime, LiteLLM venv |
 | **Node.js** | 22+ | Frontend build and dev mode |
-| **PowerShell** | 5.1+ | Native Windows launcher ([`start.ps1`](start.ps1)) |
-| **Docker** (optional) | — | Alternative deployment via [`docker-compose.yml`](docker-compose.yml) |
+| **PowerShell** | 5.1+ | Native launchers ([`start.ps1`](start.ps1), [`install-native.ps1`](install-native.ps1)) |
 
 On Windows, the launcher looks for Python via `py -3.12`, `python3.12`, or `python`.
+
+**Docker install (VPS / cross-platform)**
+
+| Requirement | Version | Used for |
+|-------------|---------|----------|
+| **Docker Engine** | — | Container runtime |
+| **Docker Compose** | v2 plugin | Orchestrates three services via [`docker-compose.yml`](docker-compose.yml) |
+
+No host Python or Node.js is required for Docker — the frontend is built inside the [`chat/Dockerfile`](chat/Dockerfile) image.
 
 ---
 
 ## Installation and Setup
 
-### Quick Start (Windows — recommended)
+### Choose your install path
+
+| Goal | Install path | Scripts |
+|------|--------------|---------|
+| **Local Windows development** | Native | [`install-native.bat`](install-native.bat) → [`start.bat`](start.bat) |
+| **VPS, Linux, Mac, or Windows with Docker Desktop** | Docker | [`install-docker.sh`](install-docker.sh) / [`install-docker.bat`](install-docker.bat) → [`start-docker.sh`](start-docker.sh) / [`start-docker.bat`](start-docker.bat) |
+
+Both paths use the same [`.env`](.env.example) configuration and persist data under `chat/staging/` and `chat/custom_tools/`.
+
+---
+
+### Native install (Windows)
 
 1. **Clone the repository**
 
@@ -95,11 +120,13 @@ On Windows, the launcher looks for Python via `py -3.12`, `python3.12`, or `pyth
    cd Ada-SI
    ```
 
-2. **Create your environment file**
+2. **Run the native installer** (first time only)
 
    ```powershell
-   copy .env.example .env
+   .\install-native.bat
    ```
+
+   This creates `.env` from [`.env.example`](.env.example), prepares runtime directories, and installs Python/Node dependencies.
 
 3. **Edit `.env`** — set at minimum:
 
@@ -158,7 +185,7 @@ The launcher handles the full native setup:
 .\start.ps1 -NoBrowser    # Start services without opening a tab
 ```
 
-### Stopping Services
+### Stopping native services
 
 ```powershell
 .\stop.ps1
@@ -166,19 +193,97 @@ The launcher handles the full native setup:
 
 Or press **Ctrl+C** in the terminal where `start.ps1` is running.
 
-### Docker (alternative)
+---
 
-Build the frontend first, then start all services with Docker Compose:
+### Docker install (VPS / cross-platform)
 
-```bash
-cd chat/frontend
-npm ci
-npm run build
-cd ../..
-docker compose up --build
+Use Docker when deploying to a VPS or when you do not want to install Python and Node on the host. The frontend is built automatically inside the Docker image — no manual `npm run build` required.
+
+**Linux / macOS**
+
+1. **Clone and install**
+
+   ```bash
+   git clone https://github.com/nazirlouis/Ada-SI.git
+   cd Ada-SI
+   chmod +x install-docker.sh start-docker.sh stop-docker.sh
+   ./install-docker.sh
+   ```
+
+2. **Edit `.env`** — add your API keys (same variables as native install).
+
+3. **Start Ada-SI**
+
+   ```bash
+   ./start-docker.sh
+   ```
+
+4. **Open the app** at `http://localhost:8080` (or `http://<your-server-ip>:8080` on a VPS).
+
+**Windows (Docker Desktop)**
+
+```powershell
+git clone https://github.com/nazirlouis/Ada-SI.git
+cd Ada-SI
+.\install-docker.bat
+# edit .env
+.\start-docker.bat
 ```
 
-The chat UI is exposed on **port 8080**. LiteLLM and tool runtime run as internal services. See [`docker-compose.yml`](docker-compose.yml) for service wiring and volume mounts.
+**Docker commands**
+
+| Action | Linux / macOS | Windows |
+|--------|---------------|---------|
+| Install | `./install-docker.sh` | `.\install-docker.bat` |
+| Start | `./start-docker.sh` | `.\start-docker.bat` |
+| Stop | `./stop-docker.sh` | `.\stop-docker.bat` |
+| View logs | `docker compose logs -f` | `docker compose logs -f` |
+| Update / rebuild | Re-run `start-docker` | Re-run `start-docker` |
+
+**What Docker runs**
+
+- Three containers: LiteLLM, tool runtime, and chat server
+- Only **port 8080** is exposed to the host; LiteLLM and tool runtime are internal
+- Data persists via volume mounts: `chat/staging/`, `chat/custom_tools/`
+- See [`docker-compose.yml`](docker-compose.yml) for service wiring
+
+---
+
+### VPS deployment
+
+When running Ada-SI on a remote server, use the **Docker install** path above.
+
+1. **Firewall** — open port 8080, or place a reverse proxy (Caddy, nginx) in front for HTTPS on port 443.
+
+   ```bash
+   sudo ufw allow 8080/tcp
+   ```
+
+2. **Security** — Ada-SI has **no built-in authentication**. Do not expose port 8080 to the public internet without a reverse proxy, VPN, or IP allowlist.
+
+3. **Auto-start on reboot** (optional systemd unit):
+
+   ```ini
+   # /etc/systemd/system/ada-si.service
+   [Unit]
+   Description=Ada-SI
+   After=docker.service
+   Requires=docker.service
+
+   [Service]
+   Type=oneshot
+   RemainAfterExit=yes
+   WorkingDirectory=/opt/Ada-SI
+   ExecStart=/usr/bin/docker compose up -d
+   ExecStop=/usr/bin/docker compose down
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+
+   Then: `sudo systemctl enable --now ada-si`
+
+4. **Back up** `chat/staging/`, `chat/custom_tools/`, and `.env` — these hold persona, secrets, and forged skills.
 
 ---
 
@@ -293,7 +398,7 @@ Ada-SI is a **single-screen application** — there is no page routing. The main
 
 ### A. First-Time Setup
 
-1. Start services with `.\start.bat` or `.\start.ps1`
+1. Run `.\install-native.bat` (first time) or `.\start.bat` / `.\start.ps1`
 2. Open **Settings → API keys** and add at least one LLM provider key (or set keys in `.env` before starting)
 3. Open **Settings → Agents** and select models for **Scout** and **Forge master**
 4. Optional: **Settings → Persona → Start bootstrap ritual** to run the "Give Scout a soul" identity setup guided by Scout
@@ -415,9 +520,20 @@ Default prompts live in [`chat/prompts_config.py`](chat/prompts_config.py). Cust
 
 ```
 Ada-SI/
-├── start.bat                 # Windows launcher (calls start.ps1)
+├── install-native.bat        # Native Windows first-time install
+├── install-native.ps1
+├── install-docker.sh         # Docker first-time install (Unix)
+├── install-docker.bat        # Docker first-time install (Windows)
+├── install-docker.ps1
+├── start.bat                 # Native Windows launcher (calls start.ps1)
 ├── start.ps1                 # Native setup + service orchestration
-├── stop.ps1                  # Stop all native services
+├── start-docker.sh           # Start Docker stack (Unix)
+├── start-docker.bat          # Start Docker stack (Windows)
+├── start-docker.ps1
+├── stop.ps1                  # Stop native services
+├── stop-docker.sh            # Stop Docker stack (Unix)
+├── stop-docker.bat           # Stop Docker stack (Windows)
+├── stop-docker.ps1
 ├── .env.example              # Environment variable template
 ├── docker-compose.yml        # Docker deployment (3 services)
 ├── LICENSE                   # MIT license
@@ -622,7 +738,8 @@ Set `ADA_LOG_LEVEL=DEBUG` in `.env` for verbose stream logging.
 | Problem | Solution |
 |---------|----------|
 | **No models in the picker** | Add a provider API key in Settings → API keys or `.env`. Only providers with valid keys return models. |
-| **Services won't start** | Verify Python 3.12 and Node.js 22+ are installed. Check `logs/` for errors. Try `.\start.ps1 -InstallOnly` then `.\start.ps1`. |
+| **Services won't start (native)** | Verify Python 3.12 and Node.js 22+ are installed. Check `logs/` for errors. Try `.\install-native.bat` or `.\start.ps1 -InstallOnly` then `.\start.ps1`. |
+| **Services won't start (Docker)** | Ensure Docker is running. Check `docker compose logs` for errors. Verify `.env` exists and API keys are set. Try `.\stop-docker.ps1` then re-run `start-docker`. |
 | **Blank or broken UI** | Run `npm run build` in `chat/frontend`, or start with `.\start.ps1 -Dev`. Ensure `chat/static/index.html` exists. |
 | **LiteLLM connection errors** | Confirm LiteLLM is running on port 4000. Check `logs/litellm.log`. Verify `LITELLM_MASTER_KEY` matches in `.env` and LiteLLM config. |
 | **Forge fails at pip step** | Review the proposed packages in the Supplies tab. Approve or reject; some packages may conflict. |
@@ -630,7 +747,8 @@ Set `ADA_LOG_LEVEL=DEBUG` in `.env` for verbose stream logging.
 | **TTS not working** | Set `ELEVENLABS_API_KEY` in Settings or `.env`. Enable TTS in Settings → Voice. |
 | **Scout seems forgetful** | Check `MEMORY.md` in Settings → Persona. Run bootstrap if persona files are empty. Ensure heartbeat is enabled. |
 | **Reset everything** | Settings → Progress → reset. Or delete `chat/staging/` and `chat/custom_tools/` (back up first). Clear browser `localStorage` for XP reset. |
-| **Port already in use** | Stop other instances with `.\stop.ps1`. Check `.ada-si.pids` for stale processes. |
+| **Port already in use (native)** | Stop other instances with `.\stop.ps1`. Check `.ada-si.pids` for stale processes. |
+| **Port already in use (Docker)** | Run `.\stop-docker.ps1` or `docker compose down`. Ensure no native `start.ps1` instance is also bound to port 8080. |
 
 ---
 
